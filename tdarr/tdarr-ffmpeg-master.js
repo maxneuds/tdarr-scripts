@@ -268,7 +268,7 @@ module.exports = async (args) => {
         overallOuputArguments: [],
     };
 
-    args.variables.ffmpegInputArguments = "-hwaccel auto";
+    args.variables.ffmpegInputArguments = "-hwaccel auto -probesize 50M -analyzeduration 100M";
 
     return {
         outputFileObj: args.inputFileObj,

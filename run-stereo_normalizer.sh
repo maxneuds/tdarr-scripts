@@ -1,6 +1,6 @@
 #!/bin/bash
-INPUT_FILE="data/test2.mkv"
-OUTPUT_FILE="data/test2_normalized.mkv"
+INPUT_FILE="data/test3.mkv"
+OUTPUT_FILE="${INPUT_FILE%.*}-normalized.${INPUT_FILE##*.}"
 
 # 1. Create dummy data directory if not exists
 mkdir -p data
@@ -22,4 +22,4 @@ echo "--- Installing Dependencies (None required, using standard Node libs) ---"
 
 # 4. Run the JS Script
 echo "--- Running Normalizer Script ---"
-node wip.js "$INPUT_FILE" "$OUTPUT_FILE"
+node stereo_normalizer.js "$INPUT_FILE" "$OUTPUT_FILE"
