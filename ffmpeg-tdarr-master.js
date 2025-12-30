@@ -1,11 +1,11 @@
 /*
- * MASTER MEDIA PROCESSOR v3.1
+ * MASTER MEDIA PROCESSOR v3.3
  * ---------------------------
  * 1. Resolution & Content Detection
  * 2. Audio Curator (Best German > Channels)
  * 3. Subtitle Deduplication (Prefer PGS over SRT)
- * 4. Smart Default Logic & Language Tagging
- * 5. Tdarr Bypass & Hardware Decode
+ * 4. Subtitle Renaming (Standardized: "GER Full", "ENG Forced")
+ * 5. Conditional Attachments
  */
 
 module.exports = async (args) => {
@@ -20,14 +20,14 @@ module.exports = async (args) => {
     const container = file.container || 'mkv';
     const transcodeVideo = args.variables.transcodeVideo !== "false";
 
-    // --- 2. ANALYZE STREAMS (Pre-Calculation) ---
+    // --- 2. ANALYZE STREAMS ---
     
     // Helper: Check forced status
     const isForced = (s) => (s.disposition && s.disposition.forced === 1) || (s.tags && s.tags.title && s.tags.title.toLowerCase().includes('forced'));
     // Helper: Get lang (returns 'ger', 'eng', 'und')
     const getLang = (s) => (s.tags && s.tags.language ? s.tags.language.toLowerCase() : 'und');
 
-    // A. Find Target Default Audio
+    // A. Audio Curator
     let germanAudioCandidates = streams.filter(s => s.codec_type === 'audio' && getLang(s) === 'ger');
     let targetDefaultAudioIndex = -1;
     
@@ -77,11 +77,12 @@ module.exports = async (args) => {
         }
     });
 
-    // C. Determine Target Default Subtitle
+    // C. Default Subtitle Logic
     let targetDefaultSubIndex = -1;
 
     // 1. Ger Forced
     const gerForced = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'ger' && isForced(s));
+    
     if (gerForced) {
         targetDefaultSubIndex = gerForced.index;
     } 
@@ -96,15 +97,7 @@ module.exports = async (args) => {
             if (activeAudioLang === 'jpn') {
                 // If Audio is Japanese, prefer English Subs
                 const engFull = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'eng' && !isForced(s));
-                if (engFull) {
-                    targetDefaultSubIndex = engFull.index;
-                } else {
-                    const gerFull = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'ger' && !isForced(s));
-                    if (gerFull) targetDefaultSubIndex = gerFull.index;
-                }
-            } else {
-                // If Audio is Ger/Eng, disable full subs
-                targetDefaultSubIndex = -1; 
+                targetDefaultSubIndex = engFull ? engFull.index : (streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'ger' && !isForced(s))?.index || -1);
             }
         }
     }
@@ -174,7 +167,7 @@ module.exports = async (args) => {
             cmd.push(`-disposition:a:${audioOutIndex} ${isDef}`);
 
             // Metadata: Language & Title
-            const langCode = getLang(s); // 'ger', 'eng'
+            const langCode = getLang(s);
             const langUpper = langCode.toUpperCase();
             let layout = channels === 1 ? '1.0' : channels === 2 ? '2.0' : channels === 6 ? '5.1' : channels === 8 ? '7.1' : `${channels}ch`;
             
@@ -201,42 +194,52 @@ module.exports = async (args) => {
             const isDef = s.index === targetDefaultSubIndex ? 'default' : '0';
             cmd.push(`-disposition:s:${subOutIndex} ${isDef}`);
 
-            // Metadata: Language & Title
-            const langCode = getLang(s);
-            const originalTitle = s.tags && s.tags.title ? s.tags.title : '';
+            // Metadata: Standardized Renaming
+            const langCode = getLang(s); // 'ger'
+            const langUpper = langCode.toUpperCase(); // 'GER'
             
-            // Explicitly set Language tag
+            // Logic: Forced vs Full
+            const type = isForced(s) ? 'Forced' : 'Full';
+            
+            // Name: "GER Forced" or "ENG Full" (using non-breaking space)
+            const newTitle = `${langUpper}\u00A0${type}`;
+
             cmd.push(`-metadata:s:s:${subOutIndex} language=${langCode}`);
-            if (originalTitle) {
-                cmd.push(`-metadata:s:s:${subOutIndex} title=${originalTitle.replace(/ /g, '\u00A0')}`);
-            }
+            cmd.push(`-metadata:s:s:${subOutIndex} title=${newTitle}`);
             
             subOutIndex++;
         }
     }
 
-    // Attachments
-    cmd.push('-map 0:t?', '-c:t copy', '-map_metadata:s:t 0:s:t');
+    // Attachments (Conditional)
+    const hasAttachments = streams.some(s => s.codec_type === 'attachment' || (s.disposition && s.disposition.attached_pic === 1));
+    if (hasAttachments) {
+        cmd.push('-map 0:t?', '-c:t copy', '-map_metadata:s:t 0:s:t');
+    }
 
     // Finalize
     const finalString = cmd.join(' ');
     console.log("Master Generated Command:", finalString);
     args.variables.ffmpegMasterCommand = finalString;
 
-    // --- 4. BYPASS OBJECT ---
-    // Tdarr: Needed for execute to bypass safety checks
-    const dummyStream = {
-        ...(videoStream || streams[0]), 
-        removed: false,
-        mapArgs: [], 
-        inputArgs: [],
-        outputArgs: []
-    };
+
+    // --- BYPASS OBJECT (FULL GHOST LIST) ---
+    // Create ghost streams to bypass safety checks such that no unwanted video mapping occurs.
+    const ghostStreams = streams.map((s, idx) => {
+        const isActive = (idx === 0);
+        return {
+            ...s,
+            removed: !isActive, 
+            mapArgs: [],        
+            inputArgs: [],
+            outputArgs: isActive ? ['-metadata', 'tdarr_bypass=true'] : [], 
+        };
+    });
 
     args.variables.ffmpegCommand = {
         init: true,
         inputFiles: [],
-        streams: [dummyStream], 
+        streams: ghostStreams,
         container: container,
         hardwareDecoding: false,
         shouldProcess: false,
