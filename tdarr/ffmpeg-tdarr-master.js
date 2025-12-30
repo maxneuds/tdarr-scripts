@@ -1,11 +1,12 @@
 /*
- * MASTER MEDIA PROCESSOR v3.3
+ * MASTER MEDIA PROCESSOR v3.4
  * ---------------------------
  * 1. Resolution & Content Detection
  * 2. Audio Curator (Best German > Channels)
  * 3. Subtitle Deduplication (Prefer PGS over SRT)
  * 4. Subtitle Renaming (Standardized: "GER Full", "ENG Forced")
  * 5. Conditional Attachments
+ * 6. Stream Sorting
  */
 
 module.exports = async (args) => {
@@ -145,70 +146,90 @@ module.exports = async (args) => {
         ...videoArgs
     ];
 
+    // --- SORTING HELPERS ---
+    const langScore = (l) => {
+        if (['ger', 'de', 'deu'].includes(l)) return 1;
+        if (['eng', 'en'].includes(l)) return 2;
+        return 3;
+    };
+
     // Audio Loop
     let audioOutIndex = 0;
-    for (let i = 0; i < streams.length; i++) {
-        const s = streams[i];
-        if (s.codec_type === 'audio') {
-            cmd.push(`-map 0:${i}`);
-            
-            // Codec
-            const channels = s.channels || 2;
-            if (s.codec_name === 'opus') {
-                cmd.push(`-c:a:${audioOutIndex} copy`);
-            } else {
-                let bitrate = channels > 5 ? '448k' : (channels > 2 ? '320k' : '160k');
-                if (channels === 1) bitrate = '96k';
-                cmd.push(`-c:a:${audioOutIndex} libopus`, `-b:a:${audioOutIndex} ${bitrate}`, `-ac:a:${audioOutIndex} ${channels}`);
-            }
+    const audioStreams = streams.filter(s => s.codec_type === 'audio');
+    
+    audioStreams.sort((a, b) => {
+        const lsA = langScore(getLang(a));
+        const lsB = langScore(getLang(b));
+        if (lsA !== lsB) return lsA - lsB;
+        return (b.channels || 0) - (a.channels || 0);
+    });
 
-            // Disposition (Default/0)
-            const isDef = s.index === targetDefaultAudioIndex ? 'default' : '0';
-            cmd.push(`-disposition:a:${audioOutIndex} ${isDef}`);
-
-            // Metadata: Language & Title
-            const langCode = getLang(s);
-            const langUpper = langCode.toUpperCase();
-            let layout = channels === 1 ? '1.0' : channels === 2 ? '2.0' : channels === 6 ? '5.1' : channels === 8 ? '7.1' : `${channels}ch`;
-            
-            // Explicitly set Language tag
-            cmd.push(`-metadata:s:a:${audioOutIndex} language=${langCode}`);
-            // Set friendly Title
-            cmd.push(`-metadata:s:a:${audioOutIndex} title=${langUpper}\u00A0${layout}`);
-            
-            audioOutIndex++;
+    for (const s of audioStreams) {
+        cmd.push(`-map 0:${s.index}`);
+        
+        // Codec
+        const channels = s.channels || 2;
+        if (s.codec_name === 'opus') {
+            cmd.push(`-c:a:${audioOutIndex} copy`);
+        } else {
+            let bitrate = channels > 5 ? '448k' : (channels > 2 ? '320k' : '160k');
+            if (channels === 1) bitrate = '96k';
+            cmd.push(`-c:a:${audioOutIndex} libopus`, `-b:a:${audioOutIndex} ${bitrate}`, `-ac:a:${audioOutIndex} ${channels}`);
         }
+
+        // Disposition (Default/0)
+        const isDef = s.index === targetDefaultAudioIndex ? 'default' : '0';
+        cmd.push(`-disposition:a:${audioOutIndex} ${isDef}`);
+
+        // Metadata: Language & Title
+        const langCode = getLang(s);
+        const langUpper = langCode.toUpperCase();
+        let layout = channels === 1 ? '1.0' : channels === 2 ? '2.0' : channels === 6 ? '5.1' : channels === 8 ? '7.1' : `${channels}ch`;
+        
+        // Explicitly set Language tag
+        cmd.push(`-metadata:s:a:${audioOutIndex} language=${langCode}`);
+        // Set friendly Title
+        cmd.push(`-metadata:s:a:${audioOutIndex} title=${langUpper}\u00A0${layout}`);
+        
+        audioOutIndex++;
     }
 
     // Subtitle Loop
     let subOutIndex = 0;
-    for (let i = 0; i < streams.length; i++) {
-        const s = streams[i];
-        if (s.codec_type === 'subtitle') {
-            if (!validSubtitleIndices.includes(s.index)) continue;
+    const subStreams = streams.filter(s => s.codec_type === 'subtitle' && validSubtitleIndices.includes(s.index));
 
-            cmd.push(`-map 0:${i}`);
-            cmd.push(`-c:s:${subOutIndex} copy`);
+    subStreams.sort((a, b) => {
+        const lsA = langScore(getLang(a));
+        const lsB = langScore(getLang(b));
+        if (lsA !== lsB) return lsA - lsB;
+        const forcedA = isForced(a);
+        const forcedB = isForced(b);
+        if (forcedA !== forcedB) return forcedA ? -1 : 1;
+        return 0;
+    });
 
-            // Disposition
-            const isDef = s.index === targetDefaultSubIndex ? 'default' : '0';
-            cmd.push(`-disposition:s:${subOutIndex} ${isDef}`);
+    for (const s of subStreams) {
+        cmd.push(`-map 0:${s.index}`);
+        cmd.push(`-c:s:${subOutIndex} copy`);
 
-            // Metadata: Standardized Renaming
-            const langCode = getLang(s); // 'ger'
-            const langUpper = langCode.toUpperCase(); // 'GER'
-            
-            // Logic: Forced vs Full
-            const type = isForced(s) ? 'Forced' : 'Full';
-            
-            // Name: "GER Forced" or "ENG Full" (using non-breaking space)
-            const newTitle = `${langUpper}\u00A0${type}`;
+        // Disposition
+        const isDef = s.index === targetDefaultSubIndex ? 'default' : '0';
+        cmd.push(`-disposition:s:${subOutIndex} ${isDef}`);
 
-            cmd.push(`-metadata:s:s:${subOutIndex} language=${langCode}`);
-            cmd.push(`-metadata:s:s:${subOutIndex} title=${newTitle}`);
-            
-            subOutIndex++;
-        }
+        // Metadata: Standardized Renaming
+        const langCode = getLang(s); // 'ger'
+        const langUpper = langCode.toUpperCase(); // 'GER'
+        
+        // Logic: Forced vs Full
+        const type = isForced(s) ? 'Forced' : 'Full';
+        
+        // Name: "GER Forced" or "ENG Full" (using non-breaking space)
+        const newTitle = `${langUpper}\u00A0${type}`;
+
+        cmd.push(`-metadata:s:s:${subOutIndex} language=${langCode}`);
+        cmd.push(`-metadata:s:s:${subOutIndex} title=${newTitle}`);
+        
+        subOutIndex++;
     }
 
     // Attachments (Conditional)
