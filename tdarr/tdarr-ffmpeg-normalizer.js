@@ -19,6 +19,17 @@ module.exports = async (args) => {
     const streams = file.ffProbeData.streams;
     const container = file.container || 'mkv';
 
+    // Check for surround sound (channels >= 4)
+    const hasSurround = streams.some(s => s.codec_type === 'audio' && (s.channels || 2) >= 4);
+    if (!hasSurround) {
+        console.log("No surround sound detected. Skipping normalizer.");
+        return {
+            outputFileObj: args.inputFileObj,
+            outputNumber: 2,
+            variables: args.variables,
+        };
+    }
+
     // --- 2. CONSTANTS & FILTERS ---
     const ACOMPRESSOR_FILTER = "acompressor=threshold=-12dB:ratio=4:attack=5:release=250:mix=0.5";
     const DYNAUDNORM_FILTER = "dynaudnorm=f=125:g=13:p=0.75";
