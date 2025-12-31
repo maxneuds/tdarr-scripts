@@ -212,9 +212,22 @@ module.exports = async (args) => {
         cmd.push(`-map 0:${s.index}`);
         cmd.push(`-c:s:${subOutIndex} copy`);
 
-        // Disposition
-        const isDef = s.index === targetDefaultSubIndex ? 'default' : '0';
-        cmd.push(`-disposition:s:${subOutIndex} ${isDef}`);
+        // [FIX] Disposition Logic (Preserve Forced)
+        let dispFlags = [];
+        
+        // 1. Is Default?
+        if (s.index === targetDefaultSubIndex) {
+            dispFlags.push('default');
+        }
+        
+        // 2. Is Forced? (Check original stream)
+        if (isForced(s)) {
+            dispFlags.push('forced');
+        }
+        
+        // 3. Combine
+        const dispositionStr = dispFlags.length > 0 ? dispFlags.join('+') : '0';
+        cmd.push(`-disposition:s:${subOutIndex} ${dispositionStr}`);
 
         // Metadata: Standardized Renaming
         const langCode = getLang(s); // 'ger'
@@ -253,7 +266,7 @@ module.exports = async (args) => {
             removed: !isActive, 
             mapArgs: [],        
             inputArgs: [],
-            outputArgs: isActive ? ['-metadata', 'tdarr_bypass=true'] : [], 
+            outputArgs: isActive ? ['-metadata', 'tdarr=true'] : [], 
         };
     });
 

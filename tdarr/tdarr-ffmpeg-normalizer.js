@@ -5,6 +5,7 @@
  * 2. Downmixes Surround (4.0/5.1/7.1) to Stereo with normalization.
  * 3. Sorts streams (Ger > Eng > Other).
  * 4. Disables Live Size Check for this run.
+ * 5. Includes "Ghost Stream" logic to prevent Tdarr "No streams mapped" error.
  */
 
 module.exports = async (args) => {
@@ -172,7 +173,7 @@ module.exports = async (args) => {
                         lang: lang,
                         channels: 2,
                         mapLabel: `[aud_norm_${index}]`,
-                        title: `${lang.toUpperCase()}\u00A0Stereo`
+                        title: `${lang.toUpperCase()}\u00A02.0`
                     });
                 }
             }
@@ -244,7 +245,6 @@ module.exports = async (args) => {
 
         const isDef = (!a.isGenerated && a.sourceIndex === targetDefaultAudioIndex) ? 'default' : '0';
         mapArgs.push(`-disposition:a:${audioOutIndex}`, isDef);
-
         mapArgs.push(`-metadata:s:a:${audioOutIndex}`, `language=${a.lang}`);
         mapArgs.push(`-metadata:s:a:${audioOutIndex}`, `title=${a.title}`);
         
@@ -257,8 +257,22 @@ module.exports = async (args) => {
         mapArgs.push('-map', s.mapLabel);
         mapArgs.push(`-c:s:${subOutIndex}`, 'copy');
         
-        const isDef = (s.sourceIndex === targetDefaultSubIndex) ? 'default' : '0';
-        mapArgs.push(`-disposition:s:${subOutIndex}`, isDef);
+        // [FIX] Disposition Logic (Default + Forced)
+        let dispFlags = [];
+        
+        // 1. Check Default preference
+        if (s.sourceIndex === targetDefaultSubIndex) {
+            dispFlags.push('default');
+        }
+        
+        // 2. Check Forced (Preserve existing flag)
+        if (s.isForced) {
+            dispFlags.push('forced');
+        }
+        
+        // 3. Combine or set 0
+        const dispositionStr = dispFlags.length > 0 ? dispFlags.join('+') : '0';
+        mapArgs.push(`-disposition:s:${subOutIndex}`, dispositionStr);
 
         mapArgs.push(`-metadata:s:s:${subOutIndex}`, `language=${s.lang}`);
         mapArgs.push(`-metadata:s:s:${subOutIndex}`, `title=${s.title}`);
@@ -272,7 +286,7 @@ module.exports = async (args) => {
     // Combine
     let finalArgs = ['-map_metadata', '-1', '-map_chapters', '0'];
     if (filterComplex.length > 0) {
-        finalArgs.push('-filter_complex', `"${filterComplex.join(';')}"`);
+        finalArgs.push('-filter_complex', filterComplex.join(';'));
     }
     finalArgs.push(...mapArgs);
 
@@ -282,19 +296,26 @@ module.exports = async (args) => {
     // Set Output Variable
     args.variables.ffmpegNormalizerCommand = commandStr;
 
-    // --- 8. DISABLE LIVE SIZE CHECK ---
-    if (args.variables.liveSizeCompare) {
-        args.variables.liveSizeCompare.enabled = "false";
-        args.variables.liveSizeCompare.error = "false";
-    }
-    args.variables.liveSizeCompareError = false;
+    // --- 8. BYPASS OBJECT (FULL GHOST LIST) ---
+    // We map ALL streams but mark them "removed: true".
+    // This ensures Tdarr's index matches the file, but it adds NO maps.
+    // We strictly enable Stream 0 (with dummy args) to satisfy the "No Streams Mapped" safety check.
+    
+    const ghostStreams = streams.map((s, idx) => {
+        const isActive = (idx === 0);
+        return {
+            ...s,
+            removed: !isActive, 
+            mapArgs: [],        
+            inputArgs: [],
+            outputArgs: isActive ? ['-metadata', 'tdarr=true'] : [], 
+        };
+    });
 
-    // --- 9. BYPASS OBJECT ---
-    // Return a dummy object so Tdarr doesn't try to build its own command if this node is treated as a flow generator
     args.variables.ffmpegCommand = {
         init: true,
         inputFiles: [],
-        streams: [], 
+        streams: ghostStreams,
         container: container,
         hardwareDecoding: false,
         shouldProcess: false,
