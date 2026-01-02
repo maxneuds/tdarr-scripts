@@ -1,5 +1,5 @@
 /*
- * MASTER MEDIA PROCESSOR v3.4
+ * MASTER MEDIA PROCESSOR v3.5
  * ---------------------------
  * 1. Resolution & Content Detection
  * 2. Audio Curator (Best German > Channels)
@@ -109,7 +109,7 @@ module.exports = async (args) => {
     // --- 3. BUILD COMMAND ---
     
     // Video Params
-    const videoStream = streams.find(s => s.codec_type === 'video');
+    const videoStream = streams.find(s => s.codec_type === 'video' && (!s.disposition || s.disposition.attached_pic !== 1));
     const width = videoStream ? (videoStream.width || 1920) : 1920;
     const height = videoStream ? (videoStream.height || 1080) : 1080;
     const pixel_count = width * height;
@@ -144,9 +144,14 @@ module.exports = async (args) => {
         '-map_metadata:g', '-1',
         '-metadata', `title=${safeTitle}`,
         '-map_chapters', '0',
-        '-map', '0:v',
-        ...videoArgs
     ];
+    // Map explicit video index to exclude Cover Art (which would be included by 0:v)
+    if (videoStream) {
+        cmd.push('-map', `0:${videoStream.index}`);
+    } else {
+        cmd.push('-map', '0:v');
+    }
+    cmd.push(...videoArgs);
 
     // --- SORTING HELPERS ---
     const langScore = (l) => {
@@ -248,7 +253,8 @@ module.exports = async (args) => {
     }
 
     // Attachments (Conditional)
-    const hasAttachments = streams.some(s => s.codec_type === 'attachment' || (s.disposition && s.disposition.attached_pic === 1));
+    // Strictly check for 'attachment' type to exclude cover art videos
+    const hasAttachments = streams.some(s => s.codec_type === 'attachment');
     if (hasAttachments) {
         cmd.push('-map 0:t?', '-c:t copy', '-map_metadata:s:t 0:s:t');
     }
