@@ -1,5 +1,5 @@
 /*
- * MASTER MEDIA PROCESSOR v3.5
+ * MASTER MEDIA PROCESSOR v3.6
  * ---------------------------
  * 1. Resolution & Content Detection
  * 2. Audio Curator (Best German > Channels)
@@ -126,10 +126,14 @@ module.exports = async (args) => {
         // Animation: Strong Denoise, No Film Grain
         // Film: Film Grain Synth
         // Note: hqdn3d is a CPU filter, but very effective for anime
-        let params = isAnimation 
-            ? '-vf hqdn3d=1.5:1.5:3:3 -svtav1-params tune=0:enable-overlays=1:scd=1:enable-tf=0'
-            : '-svtav1-params tune=0:enable-overlays=1:scd=1:film-grain=8';
-        videoArgs.push('-c:v', 'libsvtav1', '-preset', '5', '-pix_fmt', 'yuv420p10le', '-crf', crf, params);
+        let paramsArr = [];
+        if (isAnimation) {
+            paramsArr.push('-vf', 'hqdn3d=1.5:1.5:3:3', '-svtav1-params', 'tune=0:enable-overlays=1:scd=1:enable-tf=0');
+        } else {
+            paramsArr.push('-svtav1-params', 'tune=0:enable-overlays=1:scd=1:film-grain=8');
+        }
+
+        videoArgs.push('-c:v', 'libsvtav1', '-preset', '5', '-pix_fmt', 'yuv420p10le', '-crf', crf, ...paramsArr);
     } else {
         videoArgs.push('-c:v', 'copy');
     }
@@ -138,7 +142,7 @@ module.exports = async (args) => {
 
     // Base Command
     const fileName = file.fileNameWithoutExtension;
-    const safeTitle = fileName.replace(/ /g, '\u00A0');
+    const safeTitle = fileName;
 
     let cmd = [
         '-map_metadata:g', '-1',
@@ -172,31 +176,30 @@ module.exports = async (args) => {
     });
 
     for (const s of audioStreams) {
-        cmd.push(`-map 0:${s.index}`);
+        cmd.push(`-map`, `0:${s.index}`); // Split map and index for arg array
         
         // Codec
         const channels = s.channels || 2;
         if (s.codec_name === 'opus') {
-            cmd.push(`-c:a:${audioOutIndex} copy`);
+            cmd.push(`-c:a:${audioOutIndex}`, 'copy');
         } else {
             let bitrate = channels > 5 ? '448k' : (channels > 2 ? '320k' : '160k');
             if (channels === 1) bitrate = '96k';
-            cmd.push(`-c:a:${audioOutIndex} libopus`, `-b:a:${audioOutIndex} ${bitrate}`, `-ac:a:${audioOutIndex} ${channels}`);
+            cmd.push(`-c:a:${audioOutIndex}`, 'libopus', `-b:a:${audioOutIndex}`, bitrate, `-ac:a:${audioOutIndex}`, `${channels}`);
         }
 
         // Disposition (Default/0)
         const isDef = s.index === targetDefaultAudioIndex ? 'default' : '0';
-        cmd.push(`-disposition:a:${audioOutIndex} ${isDef}`);
+        cmd.push(`-disposition:a:${audioOutIndex}`, isDef);
 
         // Metadata: Language & Title
         const langCode = getLang(s);
         const langUpper = langCode.toUpperCase();
         let layout = channels === 1 ? '1.0' : channels === 2 ? '2.0' : channels === 6 ? '5.1' : channels === 8 ? '7.1' : `${channels}ch`;
-        
+        const audioTitle = `${langUpper} ${layout}`;
         // Explicitly set Language tag
-        cmd.push(`-metadata:s:a:${audioOutIndex} language=${langCode}`);
-        // Set friendly Title
-        cmd.push(`-metadata:s:a:${audioOutIndex} title=${langUpper}\u00A0${layout}`);
+        cmd.push(`-metadata:s:a:${audioOutIndex}`, `language=${langCode}`);
+        cmd.push(`-metadata:s:a:${audioOutIndex}`, `title=${audioTitle}`);
         
         audioOutIndex++;
     }
@@ -204,7 +207,6 @@ module.exports = async (args) => {
     // Subtitle Loop
     let subOutIndex = 0;
     const subStreams = streams.filter(s => s.codec_type === 'subtitle' && validSubtitleIndices.includes(s.index));
-
     subStreams.sort((a, b) => {
         const lsA = langScore(getLang(a));
         const lsB = langScore(getLang(b));
@@ -216,25 +218,22 @@ module.exports = async (args) => {
     });
 
     for (const s of subStreams) {
-        cmd.push(`-map 0:${s.index}`);
-        cmd.push(`-c:s:${subOutIndex} copy`);
+        cmd.push(`-map`, `0:${s.index}`);
+        cmd.push(`-c:s:${subOutIndex}`, 'copy');
 
-        // [FIX] Disposition Logic (Preserve Forced)
+        // Disposition Logic (Preserve Forced)
         let dispFlags = [];
-        
         // 1. Is Default?
         if (s.index === targetDefaultSubIndex) {
             dispFlags.push('default');
         }
-        
         // 2. Is Forced? (Check original stream)
         if (isForced(s)) {
             dispFlags.push('forced');
         }
-        
         // 3. Combine
         const dispositionStr = dispFlags.length > 0 ? dispFlags.join('+') : '0';
-        cmd.push(`-disposition:s:${subOutIndex} ${dispositionStr}`);
+        cmd.push(`-disposition:s:${subOutIndex}`, dispositionStr);
 
         // Metadata: Standardized Renaming
         const langCode = getLang(s); // 'ger'
@@ -243,11 +242,11 @@ module.exports = async (args) => {
         // Logic: Forced vs Full
         const type = isForced(s) ? 'Forced' : 'Full';
         
-        // Name: "GER Forced" or "ENG Full" (using non-breaking space)
-        const newTitle = `${langUpper}\u00A0${type}`;
-
-        cmd.push(`-metadata:s:s:${subOutIndex} language=${langCode}`);
-        cmd.push(`-metadata:s:s:${subOutIndex} title=${newTitle}`);
+        // Rename subtitle streams to standardized names
+        // Name: "GER Forced" or "ENG Full"
+        const newTitle = `${langUpper} ${type}`;
+        cmd.push(`-metadata:s:s:${subOutIndex}`, `language=${langCode}`);
+        cmd.push(`-metadata:s:s:${subOutIndex}`, `title=${newTitle}`);
         
         subOutIndex++;
     }
@@ -256,14 +255,8 @@ module.exports = async (args) => {
     // Strictly check for 'attachment' type to exclude cover art videos
     const hasAttachments = streams.some(s => s.codec_type === 'attachment');
     if (hasAttachments) {
-        cmd.push('-map 0:t?', '-c:t copy', '-map_metadata:s:t 0:s:t');
+        cmd.push('-map', '0:t?', '-c:t', 'copy', '-map_metadata:s:t', '0:s:t');
     }
-
-    // Finalize
-    const finalString = cmd.join(' ');
-    console.log("Master Generated Command:", finalString);
-    args.variables.ffmpegMasterCommand = finalString;
-
 
     // --- BYPASS OBJECT (FULL GHOST LIST) ---
     // Create ghost streams to bypass safety checks such that no unwanted video mapping occurs.
@@ -286,10 +279,8 @@ module.exports = async (args) => {
         hardwareDecoding: false,
         shouldProcess: false,
         overallInputArguments: [],
-        overallOuputArguments: [],
+        overallOuputArguments: cmd,
     };
-
-    args.variables.ffmpegInputArguments = "-hwaccel auto -probesize 50M -analyzeduration 100M";
 
     return {
         outputFileObj: args.inputFileObj,

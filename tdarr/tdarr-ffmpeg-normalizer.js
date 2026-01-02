@@ -1,5 +1,5 @@
 /*
- * STEREO NORMALIZER & STREAM SORTER
+ * NORMALIZER v1.2
  * ---------------------------------
  * 1. Analyzes audio streams.
  * 2. Downmixes Surround (4.0/5.1/7.1) to Stereo with normalization.
@@ -162,7 +162,7 @@ module.exports = async (args) => {
             const title = stream.tags ? stream.tags.title : '';
 
             // Skip existing stereo if we are generating a new one
-            if (channels === 2 && title === `${lang.toUpperCase()}\u00A0Stereo` && languagesWithNewStereo.has(lang)) {
+            if (channels === 2 && title === `${lang.toUpperCase()} 2.0` && languagesWithNewStereo.has(lang)) {
                 continue; 
             }
             
@@ -184,7 +184,7 @@ module.exports = async (args) => {
                         lang: lang,
                         channels: 2,
                         mapLabel: `[aud_norm_${index}]`,
-                        title: `${lang.toUpperCase()}\u00A02.0`
+                        title: `${lang.toUpperCase()} 2.0`
                     });
                 }
             }
@@ -197,7 +197,7 @@ module.exports = async (args) => {
                 lang: lang,
                 channels: channels,
                 mapLabel: `0:${index}`,
-                title: `${lang.toUpperCase()}\u00A0${audioLayout}`
+                title: `${lang.toUpperCase()} ${audioLayout}`
             });
 
         } else if (stream.codec_type === 'subtitle') {
@@ -209,7 +209,7 @@ module.exports = async (args) => {
                     lang: lang,
                     isForced: isForced(stream),
                     mapLabel: `0:${index}`,
-                    title: `${lang.toUpperCase()}\u00A0${type}`
+                    title: `${lang.toUpperCase()} ${type}`
                 });
             }
         }
@@ -268,23 +268,19 @@ module.exports = async (args) => {
         mapArgs.push('-map', s.mapLabel);
         mapArgs.push(`-c:s:${subOutIndex}`, 'copy');
         
-        // [FIX] Disposition Logic (Default + Forced)
+        // Disposition Logic (Default + Forced)
         let dispFlags = [];
-        
         // 1. Check Default preference
         if (s.sourceIndex === targetDefaultSubIndex) {
             dispFlags.push('default');
         }
-        
         // 2. Check Forced (Preserve existing flag)
         if (s.isForced) {
             dispFlags.push('forced');
         }
-        
         // 3. Combine or set 0
         const dispositionStr = dispFlags.length > 0 ? dispFlags.join('+') : '0';
         mapArgs.push(`-disposition:s:${subOutIndex}`, dispositionStr);
-
         mapArgs.push(`-metadata:s:s:${subOutIndex}`, `language=${s.lang}`);
         mapArgs.push(`-metadata:s:s:${subOutIndex}`, `title=${s.title}`);
         
@@ -300,12 +296,7 @@ module.exports = async (args) => {
         finalArgs.push('-filter_complex', filterComplex.join(';'));
     }
     finalArgs.push(...mapArgs);
-
-    const commandStr = finalArgs.join(' ');
-    console.log("Normalizer Generated Command:", commandStr);
-    
-    // Set Output Variable
-    args.variables.ffmpegNormalizerCommand = commandStr;
+    console.log("Normalizer Generated Command:", finalArgs.join(' '));
 
     // --- 8. BYPASS OBJECT (FULL GHOST LIST) ---
     // We map ALL streams but mark them "removed: true".
@@ -331,10 +322,8 @@ module.exports = async (args) => {
         hardwareDecoding: false,
         shouldProcess: false,
         overallInputArguments: [],
-        overallOuputArguments: [],
+        overallOuputArguments: finalArgs,
     };
-
-    args.variables.ffmpegInputArguments = "-hwaccel auto -probesize 50M -analyzeduration 100M";
 
     return {
         outputFileObj: args.inputFileObj,
