@@ -18,7 +18,7 @@ module.exports = async (args) => {
 
     const file = args.inputFileObj;
     const streams = file.ffProbeData.streams;
-    const container = file.container || 'mkv';
+    const container = 'mkv';
     const transcodeVideo = args.variables.transcodeVideo !== "false";
 
     // --- 2. ANALYZE STREAMS ---
@@ -133,6 +133,8 @@ module.exports = async (args) => {
     } else {
         videoArgs.push('-c:v', 'copy');
     }
+    // Force mkv
+    videoArgs.push('-f', 'matroska')
 
     // Base Command
     const fileName = file.fileNameWithoutExtension;

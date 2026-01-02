@@ -17,7 +17,7 @@ module.exports = async (args) => {
 
     const file = args.inputFileObj;
     const streams = file.ffProbeData.streams;
-    const container = file.container || 'mkv';
+    const container = 'mkv';
 
     // Check for surround sound (channels >= 4)
     const hasSurround = streams.some(s => s.codec_type === 'audio' && (s.channels || 2) >= 4);
