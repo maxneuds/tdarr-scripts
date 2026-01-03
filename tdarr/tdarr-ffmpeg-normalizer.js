@@ -1,11 +1,12 @@
 /*
- * NORMALIZER v1.2
+ * NORMALIZER v1.4
  * ---------------------------------
  * 1. Analyzes audio streams.
  * 2. Downmixes Surround (4.0/5.1/7.1) to Stereo with normalization.
  * 3. Sorts streams (Ger > Eng > Other).
  * 4. Disables Live Size Check for this run.
- * 5. Includes "Ghost Stream" logic to prevent Tdarr "No streams mapped" error.
+ * 5. Safe Attachment Mapping (Preserves Mimetype).
+ * 6. Includes "Ghost Stream" logic to prevent Tdarr "No streams mapped" error.
  */
 
 module.exports = async (args) => {
@@ -237,7 +238,7 @@ module.exports = async (args) => {
         return 0;
     });
 
-    // --- 7. BUILD COMMAND ---
+    // --- 7. BUILD COMMAND ARRAY ---
     let mapArgs = [];
     
     // Video
@@ -287,8 +288,28 @@ module.exports = async (args) => {
         subOutIndex++;
     });
 
-    // Attachments
-    mapArgs.push('-map', '0:t?', '-c:t', 'copy');
+    // 1. Checks if attachment has mimetype to prevent FFmpeg crash.
+    // 2. Explicitly maps metadata for attachments (overriding global strip).
+    const attachmentStreams = streams.filter(s => s.codec_type === 'attachment');
+    let hasMappedAttachment = false;
+
+    attachmentStreams.forEach(s => {
+        // Check if mimetype tag exists
+        const hasMimetype = s.tags && (s.tags.mimetype || s.tags.MIMETYPE || s.tags['Content-Type']);
+        
+        if (hasMimetype) {
+            mapArgs.push('-map', `0:${s.index}`);
+            hasMappedAttachment = true;
+        } else {
+            console.log(`[Normalizer] Skipping Attachment Stream ${s.index}: No Mimetype Tag.`);
+        }
+    });
+
+    if (hasMappedAttachment) {
+        mapArgs.push('-c:t', 'copy');
+        // CRITICAL: Explicitly copy attachment metadata, otherwise -map_metadata -1 wipes the mimetype!
+        mapArgs.push('-map_metadata:s:t', '0:s:t');
+    }
 
     // Combine
     let finalArgs = ['-map_metadata', '-1', '-map_chapters', '0'];
@@ -296,6 +317,8 @@ module.exports = async (args) => {
         finalArgs.push('-filter_complex', filterComplex.join(';'));
     }
     finalArgs.push(...mapArgs);
+
+    // Log the joined array for debug
     console.log("Normalizer Generated Command:", finalArgs.join(' '));
 
     // --- 8. BYPASS OBJECT (FULL GHOST LIST) ---
@@ -320,7 +343,7 @@ module.exports = async (args) => {
         streams: ghostStreams,
         container: container,
         hardwareDecoding: false,
-        shouldProcess: false,
+        shouldProcess: true,
         overallInputArguments: [],
         overallOuputArguments: finalArgs,
     };

@@ -1,5 +1,5 @@
 /*
- * MASTER MEDIA PROCESSOR v3.6
+ * MASTER MEDIA PROCESSOR v3.7
  * ---------------------------
  * 1. Resolution & Content Detection
  * 2. Audio Curator (Best German > Channels)
@@ -19,7 +19,8 @@ module.exports = async (args) => {
     const file = args.inputFileObj;
     const streams = file.ffProbeData.streams;
     const container = 'mkv';
-    const transcodeVideo = args.variables.transcodeVideo !== "false";
+    const transcodeVar = args.variables.user.transcodeVideo;
+    const transcodeVideo = String(transcodeVar).toLowerCase() !== 'false';
 
     // --- 2. ANALYZE STREAMS ---
     
@@ -117,6 +118,7 @@ module.exports = async (args) => {
     const isAnimation = ['anime', 'cartoon', 'animation'].some(k => filePath.includes(k));
     
     let videoArgs = [];
+    console.log(`Transcoding Video: ${transcodeVideo}`)
     if (transcodeVideo) {
         let crf = '25'; 
         if (pixel_count >= 5000000) crf = '28'; // 4K
@@ -253,9 +255,22 @@ module.exports = async (args) => {
 
     // Attachments (Conditional)
     // Strictly check for 'attachment' type to exclude cover art videos
-    const hasAttachments = streams.some(s => s.codec_type === 'attachment');
-    if (hasAttachments) {
-        cmd.push('-map', '0:t?', '-c:t', 'copy', '-map_metadata:s:t', '0:s:t');
+    // Check for missing mimetypes to prevent MKV muxer crash
+    const attachmentStreams = streams.filter(s => s.codec_type === 'attachment');
+    let hasMappedAttachment = false;
+
+    attachmentStreams.forEach(s => {
+        const hasMimetype = s.tags && (s.tags.mimetype || s.tags.MIMETYPE || s.tags['Content-Type']);
+        if (hasMimetype) {
+            cmd.push('-map', `0:${s.index}`);
+            hasMappedAttachment = true;
+        } else {
+            console.log(`[MasterNode] Skipping Attachment Stream ${s.index}: No Mimetype Tag.`);
+        }
+    });
+
+    if (hasMappedAttachment) {
+        cmd.push('-c:t', 'copy', '-map_metadata:s:t', '0:s:t');
     }
 
     // --- BYPASS OBJECT (FULL GHOST LIST) ---
