@@ -1,5 +1,5 @@
 /*
- * MASTER MEDIA PROCESSOR v3.8
+ * MASTER MEDIA PROCESSOR v3.9
  * ---------------------------
  * 1. Resolution & Content Detection
  * 2. Audio Curator (Best German > Channels)
@@ -120,10 +120,10 @@ module.exports = async (args) => {
     let videoArgs = [];
     console.log(`Transcoding Video: ${transcodeVideo}`)
     if (transcodeVideo) {
-        let crf = '25'; 
-        if (pixel_count >= 5000000) crf = '27'; // 4K
-        else if (pixel_count >= 3000000) crf = '26'; // 2K
-        else if (pixel_count >= 1000000) crf = '25'; // HD
+        let crf = '24'; 
+        if (pixel_count >= 5000000) crf = '26'; // 4K
+        else if (pixel_count >= 3000000) crf = '25'; // 2K
+        else if (pixel_count >= 1000000) crf = '24'; // HD
         else crf = '32'; // SD
         // Animation: Strong Denoise, No Film Grain
         // Film: Film Grain Synth
@@ -132,6 +132,9 @@ module.exports = async (args) => {
         if (isAnimation) {
             paramsArr.push('-vf', 'hqdn3d=1.5:1.5:3:3', '-svtav1-params', 'tune=0:enable-overlays=1:scd=1:enable-tf=0');
         } else {
+            // Grain Switch: 4K (Cleaner) vs HD (Stronger for banding fix)
+            const grainLevel = (pixel_count >= 5000000) ? '15' : '25';
+            paramsArr.push('-svtav1-params', `tune=0:enable-overlays=1:scd=1:enable-qm=1:film-grain=${grainLevel}`);
             paramsArr.push('-svtav1-params', 'tune=0:enable-overlays=1:scd=1:film-grain=8');
         }
 
