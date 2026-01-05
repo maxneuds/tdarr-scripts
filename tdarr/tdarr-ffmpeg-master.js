@@ -121,7 +121,7 @@ module.exports = async (args) => {
     console.log(`Transcoding Video: ${transcodeVideo}`)
     if (transcodeVideo) {
         let crf = '25'; 
-        if (pixel_count >= 5000000) crf = '28'; // 4K
+        if (pixel_count >= 5000000) crf = '27'; // 4K
         else if (pixel_count >= 3000000) crf = '26'; // 2K
         else if (pixel_count >= 1000000) crf = '25'; // HD
         else crf = '32'; // SD

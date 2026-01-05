@@ -1,92 +1,145 @@
-Here is the updated README documentation tailored specifically for **v3.3**, focusing on the new audio curation, subtitle renaming, and deduplication features.
+Here is a comprehensive `README.md` formatted for GitHub, documenting the logic, parameters, and audio engineering principles used in your scripts.
 
 ---
 
-# Tdarr Master Media Processor (v3.3)
+# Tdarr AV Automation Scripts
 
-A "Grand Unified" Tdarr plugin designed to replace complex, multi-node flows with a single, intelligent JavaScript processor. This script provides **"Vim-mode" precision control** over FFmpeg, bypassing Tdarr's default stream mapping logic to prevent conflicts, standardize metadata, and curate tracks intelligently.
+This repository contains two advanced Tdarr plugins designed for high-end media archival. They focus on intelligent track sorting, AV1 transcoding, and audiophile-grade stereo downmixing with dialogue normalization.
 
-## 🚀 Key Features
+**Scripts included:**
 
-### 1. Zero-Conflict "Ghost" Protocol
+1. **Master Media Processor v3.7** (Video Transcoding & Track Curation)
+2. **Audio Normalizer v1.4** (Dynamic Downmixing & Loudness Correction)
 
-* **The Problem:** Tdarr's default behavior often auto-injects `-c copy` or duplicate maps for streams it thinks are unhandled, corrupting complex custom commands.
-* **The Solution:** This script uses a "Full Ghost" object strategy. It clones the file's stream list for Tdarr's internal safety checks but marks them as `removed`, forcing Tdarr to generate **zero** flags. The script then injects the *actual* FFmpeg command string manually.
+---
 
-### 2. Audio Curation & Normalization
+## 1. Master Media Processor v3.7
 
-* **German Priority:** Automatically scans for German audio tracks. If multiple exist, it selects the "Best" track based on channel count (e.g., 5.1 beats Stereo) and sets it as `Default`.
-* **Smart Transcoding:**
-* **Opus:** Converts track to Opus.
-* **Bitrate Logic:** 96k (Mono), 160k (Stereo), 320k (5.1), 448k (7.1).
-* **Passthrough:** If the source is already Opus, it copies the stream.
+A monolithic plugin designed to act as the "brain" of the encoding stack. It handles video compression (AV1), subtitle deduplication, and metadata standardization.
 
+### 🔌 Parameters & Input Variables
 
-* **Metadata:** Sanitizes track titles to a clean standard (e.g., `GER 5.1ch`) and explicitly sets the `language` tag.
+The script accepts the following variable via Tdarr's library settings:
 
-### 3. Intelligent Subtitle Management
+| Variable | Type | Default | Description |
+| --- | --- | --- | --- |
+| `transcodeVideo` | String | `true` | If set to `false`, the video stream is copied (`-c:v copy`). If `true`, it triggers the SVT-AV1 logic. |
 
-* **Deduplication:** Automatically detects if a movie has the same subtitle (e.g., "German Forced") in both **PGS** (Image) and **SRT** (Text) formats. It **removes the SRT** version to reduce clutter, preferring the higher-quality PGS.
-* **Standardized Renaming:** Renames tracks using a strict naming convention with **Non-Breaking Spaces** (`\u00A0`) to prevent command line errors:
-* `GER Forced`
-* `ENG Full`
+### 🧠 Logic Breakdown
 
+#### A. Video Engine (SVT-AV1)
 
-* **Smart Defaults:**
-* **Forced Priority:** Forced subtitles (German > English) are always set to `Default`.
-* **Anime Rule:** If the active audio is **Japanese**, the script defaults to **English** subtitles.
-* **Clean Playback:** If the active audio is German or English, full subtitles are disabled by default.
+The script automatically detects the resolution and content type (Animation vs. Live Action) to apply specific SVT-AV1 parameters.
 
-
-
-### 4. Content-Aware Video Encoding
-
-* **Resolution Detection:** Automatically adjusts SVT-AV1 **CRF** based on pixel count:
-* **4K:** CRF 28
-* **2K:** CRF 26
-* **1080p:** CRF 25
+* **CRF targeting:**
+* **4K (≥ 5MP):** CRF 27
+* **2K (≥ 3MP):** CRF 26
+* **1080p (≥ 1MP):** CRF 25
 * **SD:** CRF 32
 
 
-* **Type Detection:** Scans the filepath for keywords (`anime`, `cartoon`, `animation`).
-* **Animation:** Uses `hqdn3d` (strong denoise, cleaner lines).
-* **Live Action:** Uses Film Grain Synthesis (preserves texture).
+* **Content Detection:**
+* **Animation:** Detects keywords (`anime`, `cartoon`) in the file path. Applies `hqdn3d` (High Quality 3D Denoise) to flatten flat colors and disables film grain synth.
+* **Film:** Enables **Film Grain Synthesis** (`film-grain=8`) to preserve texture at lower bitrates.
 
 
 
-### 5. Audio-Only Fallback
+#### B. Audio Curator
 
-Supports a Flow Variable `transcodeVideo`.
+Prioritizes German language tracks but retains English and others based on channel count.
 
-* If set to `"false"`, the script **Copies** the video stream (`-c:v copy`) bit-for-bit.
-* It *still* performs all Audio Curation, Subtitle Cleaning, and Metadata standardization.
+1. **Selection:** Finds the best German track (highest channel count).
+2. **Fallback:** If no German audio exists, defaults to the original default track.
+3. **Encoding:** Converts all audio to **Opus** to save space while maintaining transparency.
+* `1ch` -> 96k
+* `2ch` -> 160k
+* `5.1` -> 320k
+* `7.1` -> 448k
+
+
+
+#### C. Subtitle Deduplication
+
+Solves the "subtitle spam" issue.
+
+1. **Registry:** Scans all PGS (Image-based) subtitles first.
+2. **Dedupe:** If a text-based (SRT) subtitle exists with the same Language and Forced status as a PGS track, the SRT is **discarded**.
+3. **Renaming:** Renames tracks to standardized titles: `GER Full`, `ENG Forced`, etc.
+4. **Default Logic:**
+* Priority 1: **German Forced**
+* Priority 2: **English Forced**
+* Priority 3: **Audio Match** (If Audio is Japanese, default to English Full).
+
+
 
 ---
 
-## 🛠️ Installation & Usage
+## 2. Audio Normalizer v1.5
 
-1. **Create Plugin:** In Tdarr, create a new **Local Plugin** (type: JS / Custom Function).
-2. **Paste Code:** Copy the contents of `master-media-processor.js` into the code editor.
-3. **Flow Setup:**
-* **Node 1:** `Input File`
-* **Node 2 (Optional):** `Set Flow Variable` (Name: `transcodeVideo`, Value: `false`) *<-- Only if you want to skip video encoding.*
-* **Node 3:** `JS: Master Media Processor` (This plugin).
-* **Node 4:** `ffmpegCommandCustomArguments`.
-* **Value:** `-probesize 30M -analyzeduration 30M {{{args.variables.ffmpegMasterCommand}}}`
+This script is a conditional processor. It **only** runs if Surround Sound (4.0, 5.1, or 7.1) is detected. It generates a new "Night Mode" stereo track alongside the original surround tracks.
+
+### 🎛 The Audio Chain
+
+The script utilizes a complex FFmpeg filter chain to downmix surround sound without losing dialogue clarity or bass impact.
+
+**The Filter Chain:**
+`pan` -> `dynaudnorm` -> `equalizer` -> `highpass` -> `alimiter`
+
+1. **Smart Downmix (Pan):**
+* **Center Channel (Dialogue):** Boosted to **1.0** (standard is 0.707) to ensure clear voices.
+* **Surrounds:** Attenuated to **0.6** to reduce background clutter.
+* **LFE (Subwoofer):** Mixed in at **1.0** to retain rumble on full-range stereo speakers.
 
 
-* **Node 5:** `ffmpegCommandExecute`.
-* **Critical:** Go to this node's options and ensure **"Enable map all streams" is UNCHECKED**.
+2. **Dynamic Normalization (`dynaudnorm`):**
+* Window size: `250ms` (Fast reaction time).
+* Max Gain: `10dB` (Boosts whispers effectively).
+* Logic: Compresses dynamic range intelligently so you don't have to ride the volume remote.
 
+
+3. **Safety Filters:**
+* **Highpass (20Hz):** Removes inaudible DC offset rumble.
+* **Limiter (-0.9dB):** Prevents digital clipping (True Peak safety).
+
+
+
+### 📊 Stream Sorting & Management
+
+The script reorganizes the file to ensure players select the correct languages automatically.
+
+* **Language Priority:** German (1) > English (2) > Others (3).
+* **Audio Sort:** Within a language, Surround tracks are placed before Stereo tracks.
+* **Subtitles:** Copied via pass-through but re-sorted to match the Master Processor's logic (Forced tracks prioritized).
+* **Attachments:** Explicitly checks for `mimetype` tags to prevent MKV muxer crashes when copying fonts/cover art.
 
 ---
 
-## 🔍 Technical Details
+## 🔌 Technical Implementation Notes
 
-### The `tdarr_bypass` Tag
+### The "Ghost Stream" Bypass
 
-You may notice a global metadata tag `-metadata tdarr_bypass=true` in the generated command. This is a harmless "dummy argument" injected into the Tdarr object to satisfy Tdarr's requirement that at least one stream must be processed, preventing the "No streams mapped" error while keeping Tdarr's auto-logic disabled.
+Both scripts utilize a specialized technique to bypass Tdarr's internal safety checks.
 
-### Conditional Attachments
+Tdarr normally requires plugins to map streams using specific internal objects. Because these scripts build complex, custom filter chains that Tdarr's parser cannot natively understand, we use a **Ghost Stream** approach:
 
-The script checks for the existence of fonts/attachments before attempting to map them. This prevents `Stream specifier t does not match any streams` errors on files that do not contain embedded fonts (common in non-Anime content).
+```javascript
+// Example from source
+const ghostStreams = streams.map((s, idx) => {
+    const isActive = (idx === 0);
+    return {
+        ...s,
+        removed: !isActive, // Marks all but one stream as removed
+        outputArgs: isActive ? ['-metadata', 'tdarr=true'] : [],
+    };
+});
+
+```
+
+This tricks Tdarr into believing the streams are being handled standardly, while the actual heavy lifting is done via the `overallOuputArguments` array which contains the raw FFmpeg command constructed by the script.
+
+### Installation
+
+1. Copy the `.js` file content into your Tdarr Local Plugins folder.
+2. Scan for new plugins in Tdarr.
+3. Add **Master Media Processor** to your stack first.
+4. Add **Normalizer** to your stack second (it will automatically skip if no surround sound is found).

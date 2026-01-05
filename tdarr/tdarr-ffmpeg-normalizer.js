@@ -1,5 +1,5 @@
 /*
- * NORMALIZER v1.4
+ * NORMALIZER v1.5
  * ---------------------------------
  * 1. Analyzes audio streams.
  * 2. Downmixes Surround (4.0/5.1/7.1) to Stereo with normalization.
@@ -32,14 +32,12 @@ module.exports = async (args) => {
     }
 
     // --- 2. CONSTANTS & FILTERS ---
-    const ACOMPRESSOR_FILTER = "acompressor=threshold=-12dB:ratio=4:attack=5:release=250:mix=0.5";
-    const DYNAUDNORM_FILTER = "dynaudnorm=f=125:g=13:p=0.75";
+    const DYNAUDNORM_FILTER = "dynaudnorm=f=250:g=31:p=0.95:m=10";
     const EQUALIZER_FILTER = "equalizer=f=2000:t=q:w=1:g=2";
     const HIGHPASS_FILTER = "highpass=f=20";
     const ALIMITER_FILTER = "alimiter=limit=0.9";
 
     const NORM_FILTER = [
-        ACOMPRESSOR_FILTER,
         DYNAUDNORM_FILTER,
         EQUALIZER_FILTER,
         HIGHPASS_FILTER,
@@ -47,9 +45,9 @@ module.exports = async (args) => {
     ].join(',');
 
     const PAN_FILTERS = {
-        '4.0': "pan=stereo|FL=0.9*FL+0.35*BL+0.35*SL|FR=0.9*FR+0.35*BR+0.35*SR",
-        '5.1': "pan=stereo|FL=0.9*FL+1.0*FC+0.75*LFE+0.25*BL+0.25*SL|FR=0.9*FR+1.0*FC+0.75*LFE+0.25*BR+0.25*SR",
-        '7.1': "pan=stereo|FL=0.85*FL+1.0*FC+0.75*LFE+0.35*BL+0.35*SL|FR=0.85*FR+1.0*FC+0.75*LFE+0.35*BR+0.35*SR"
+        '4.0': "pan=stereo|FL<FL+0.7*BL+0.7*SL|FR<FR+0.7*BR+0.7*SR",
+        '5.1': "pan=stereo|FL<FL+1.0*FC+0.6*SL+1.0*LFE|FR<FR+1.0*FC+0.6*SR+1.0*LFE",
+        '7.1': "pan=stereo|FL<FL+1.0*FC+0.6*BL+0.6*SL+1.0*LFE|FR<FR+1.0*FC+0.6*BR+0.6*SR+1.0*LFE",
     };
 
     // --- 3. HELPERS ---
