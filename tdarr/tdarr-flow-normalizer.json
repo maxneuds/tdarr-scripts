@@ -1,0 +1,253 @@
+{
+  "_id": "JOcVVRtSp",
+  "name": "Normalizer",
+  "description": "Normalizer",
+  "tags": "",
+  "flowPlugins": [
+    {
+      "name": "Delete Original",
+      "sourceRepo": "Community",
+      "pluginName": "deleteFile",
+      "version": "1.0.0",
+      "id": "HoF8mH-KJ",
+      "position": {
+        "x": 984,
+        "y": 408
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "fileToDelete": "originalFile",
+        "deleteParentFolderIfEmpty": "true"
+      }
+    },
+    {
+      "name": "Wait for Filesystem",
+      "sourceRepo": "Community",
+      "pluginName": "waitTimeout",
+      "version": "1.0.0",
+      "id": "9NawNEukH",
+      "position": {
+        "x": 984,
+        "y": 360
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "unit": "seconds",
+        "amount": "55"
+      }
+    },
+    {
+      "name": "Input File",
+      "sourceRepo": "Community",
+      "pluginName": "inputFile",
+      "version": "1.0.0",
+      "id": "ibrLkV_Os",
+      "position": {
+        "x": 840,
+        "y": -180
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "fileAccessChecks": "true",
+        "pauseNodeIfAccessChecksFail": "true"
+      }
+    },
+    {
+      "name": "JS: Normalizer",
+      "sourceRepo": "Community",
+      "pluginName": "customFunction",
+      "version": "1.0.0",
+      "id": "9703jVfHF",
+      "position": {
+        "x": 840,
+        "y": -48
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "code": "/*\n * NORMALIZER v1.6\n * ---------------------------------\n * 1. Analyzes audio streams.\n * 2. Downmixes Surround (4.0/5.1/7.1) to Stereo with normalization.\n * 3. Sorts streams (Ger > Eng > Other).\n * 4. Disables Live Size Check for this run.\n * 5. Safe Attachment Mapping (Preserves Mimetype).\n * 6. Includes \"Ghost Stream\" logic to prevent Tdarr \"No streams mapped\" error.\n */\n\nmodule.exports = async (args) => {\n  try {\n    // --- 1. SETUP & SAFETY ---\n    if (!args.inputFileObj || !args.inputFileObj.ffProbeData) {\n      throw new Error(\"File has not been scanned!\");\n    }\n\n    const file = args.inputFileObj;\n    const streams = file.ffProbeData.streams;\n    const container = 'mkv';\n\n    // Check for surround sound (channels >= 4)\n    const hasSurround = streams.some(s => s.codec_type === 'audio' && (s.channels || 2) >= 4);\n    if (!hasSurround) {\n        console.log(\"No surround sound detected. Skipping normalizer.\");\n        return {\n            outputFileObj: args.inputFileObj,\n            outputNumber: 2,\n            variables: args.variables,\n        };\n    }\n\n    // --- 2. CONSTANTS & FILTERS ---\n    const DYNAUDNORM_FILTER = \"dynaudnorm=f=250:g=31:p=0.95:m=10\";\n    const EQUALIZER_FILTER = \"equalizer=f=2000:t=q:w=1:g=2\";\n    const HIGHPASS_FILTER = \"highpass=f=20\";\n    const ALIMITER_FILTER = \"alimiter=limit=0.9\";\n\n    const NORM_FILTER = [\n        DYNAUDNORM_FILTER,\n        EQUALIZER_FILTER,\n        HIGHPASS_FILTER,\n        ALIMITER_FILTER\n    ].join(',');\n\n    const PAN_FILTERS = {\n        '4.0': \"pan=stereo|FL<FL+0.7*BL+0.7*SL|FR<FR+0.7*BR+0.7*SR\",\n        '5.1': \"pan=stereo|FL<FL+1.0*FC+0.6*SL+1.0*LFE|FR<FR+1.0*FC+0.6*SR+1.0*LFE\",\n        '7.1': \"pan=stereo|FL<FL+1.0*FC+0.6*BL+0.6*SL+1.0*LFE|FR<FR+1.0*FC+0.6*BR+0.6*SR+1.0*LFE\",\n    };\n\n    // --- 3. HELPERS ---\n    const isForced = (s) => (s.disposition && s.disposition.forced === 1) || (s.tags && s.tags.title && s.tags.title.toLowerCase().includes('forced'));\n    const getLang = (s) => (s.tags && s.tags.language ? s.tags.language.toLowerCase() : 'und');\n    const getAudioLayout = (channels) => {\n        switch (channels) {\n            case 1: return '1.0';\n            case 2: return '2.0';\n            case 6: return '5.1';\n            case 8: return '7.1';\n            default: return `${channels}ch`;\n        }\n    };\n\n    // --- 4. ANALYZE STREAMS ---\n    \n    // A. Audio Curator (Find Default)\n    let germanAudioCandidates = streams.filter(s => s.codec_type === 'audio' && getLang(s) === 'ger');\n    let targetDefaultAudioIndex = -1;\n    \n    if (germanAudioCandidates.length > 0) {\n        germanAudioCandidates.sort((a, b) => (b.channels || 0) - (a.channels || 0));\n        targetDefaultAudioIndex = germanAudioCandidates[0].index;\n    } else {\n        const originalDefault = streams.find(s => s.codec_type === 'audio' && s.disposition && s.disposition.default === 1);\n        targetDefaultAudioIndex = originalDefault ? originalDefault.index : (streams.find(s => s.codec_type === 'audio')?.index || -1);\n    }\n\n    const activeAudioStream = streams.find(s => s.index === targetDefaultAudioIndex);\n    const activeAudioLang = activeAudioStream ? getLang(activeAudioStream) : 'und';\n\n    // B. Subtitle Deduplication\n    let pgsRegistry = new Set();\n    streams.forEach(s => {\n        if (s.codec_type === 'subtitle' && s.codec_name === 'hdmv_pgs_subtitle') {\n            const key = `${getLang(s)}_${isForced(s)}`;\n            pgsRegistry.add(key);\n        }\n    });\n\n    let validSubtitleIndices = [];\n    const allowedSubLangs = ['eng', 'en', 'ger', 'de', 'deu', 'jpn', 'und'];\n    \n    streams.forEach(s => {\n        if (s.codec_type === 'subtitle') {\n            const lang = getLang(s);\n            const forced = isForced(s);\n            const title = (s.tags && s.tags.title || '').toLowerCase();\n            \n            if (!allowedSubLangs.includes(lang) || title.includes('commentary')) return;\n\n            if (s.codec_name === 'subrip' && pgsRegistry.has(`${lang}_${forced}`)) {\n                return; \n            }\n            validSubtitleIndices.push(s.index);\n        }\n    });\n\n    // C. Default Subtitle Logic\n    let targetDefaultSubIndex = -1;\n    const gerForced = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'ger' && isForced(s));\n    \n    if (gerForced) {\n        targetDefaultSubIndex = gerForced.index;\n    } else {\n        const engForced = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'eng' && isForced(s));\n        if (engForced) {\n            targetDefaultSubIndex = engForced.index;\n        } else {\n            if (activeAudioLang === 'jpn') {\n                const engFull = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'eng' && !isForced(s));\n                targetDefaultSubIndex = engFull ? engFull.index : (streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'ger' && !isForced(s))?.index || -1);\n            }\n        }\n    }\n\n    // --- 5. BUILD MAPS ---\n    let filterComplex = [];\n    let videoMaps = [];\n    let audioMaps = [];\n    let subMaps = [];\n\n    // Pre-analysis for stereo track replacement\n    const languagesWithNewStereo = new Set();\n    for (const stream of streams) {\n        if (stream.codec_type === 'audio' && stream.channels >= 4) {\n            let layout;\n            if (stream.channels === 4) layout = '4.0';\n            else if (stream.channels === 6) layout = '5.1';\n            else if (stream.channels >= 8) layout = '7.1';\n            \n            if (layout && PAN_FILTERS[layout]) {\n                languagesWithNewStereo.add(getLang(stream));\n            }\n        }\n    }\n\n    for (const stream of streams) {\n        const index = stream.index;\n        \n        if (stream.codec_type === 'video') {\n            videoMaps.push({\n                index: index,\n                args: ['-map', `0:${index}`, '-c:v', 'copy']\n            });\n        }\n        else if (stream.codec_type === 'audio') {\n            const channels = stream.channels || 2;\n            const lang = getLang(stream);\n            const title = stream.tags ? stream.tags.title : '';\n\n            // Skip existing stereo if we are generating a new one\n            if (channels === 2 && title === `${lang.toUpperCase()} 2.0` && languagesWithNewStereo.has(lang)) {\n                continue; \n            }\n            \n            // Generate Stereo\n            if (channels >= 4) {\n                let layout;\n                if (channels === 4) layout = '4.0';\n                else if (channels === 6) layout = '5.1';\n                else if (channels >= 8) layout = '7.1';\n\n                if (layout && PAN_FILTERS[layout]) {\n                    const pan = PAN_FILTERS[layout];\n                    const filterChain = `[0:${index}]${pan},${NORM_FILTER}[aud_norm_${index}]`;\n                    filterComplex.push(filterChain);\n\n                    audioMaps.push({\n                        sourceIndex: index,\n                        isGenerated: true,\n                        lang: lang,\n                        channels: 2,\n                        mapLabel: `[aud_norm_${index}]`,\n                        title: `${lang.toUpperCase()} 2.0`\n                    });\n                }\n            }\n\n            // Keep Original\n            const audioLayout = getAudioLayout(channels);\n            audioMaps.push({\n                sourceIndex: index,\n                isGenerated: false,\n                lang: lang,\n                channels: channels,\n                mapLabel: `0:${index}`,\n                title: `${lang.toUpperCase()} ${audioLayout}`\n            });\n\n        } else if (stream.codec_type === 'subtitle') {\n            if (validSubtitleIndices.includes(index)) {\n                const lang = getLang(stream);\n                let type = isForced(stream) ? 'Forced' : 'Full';\n                if ((stream.tags && stream.tags.title || '').toLowerCase().includes('sdh')) {\n                    type = 'SDH';\n                }\n\n                subMaps.push({\n                    sourceIndex: index,\n                    lang: lang,\n                    isForced: isForced(stream),\n                    mapLabel: `0:${index}`,\n                    title: `${lang.toUpperCase()} ${type}`\n                });\n            }\n        }\n    }\n\n    // --- 6. SORTING ---\n    const langScore = (l) => {\n        if (['ger', 'de', 'deu'].includes(l)) return 1;\n        if (['eng', 'en'].includes(l)) return 2;\n        return 3;\n    };\n\n    audioMaps.sort((a, b) => {\n        const lsA = langScore(a.lang);\n        const lsB = langScore(b.lang);\n        if (lsA !== lsB) return lsA - lsB;\n        return b.channels - a.channels;\n    });\n\n    subMaps.sort((a, b) => {\n        const lsA = langScore(a.lang);\n        const lsB = langScore(b.lang);\n        if (lsA !== lsB) return lsA - lsB;\n        if (a.isForced !== b.isForced) return a.isForced ? -1 : 1;\n        return 0;\n    });\n\n    // --- 7. BUILD COMMAND ARRAY ---\n    let mapArgs = [];\n    \n    // Video\n    videoMaps.forEach(v => mapArgs.push(...v.args));\n\n    // Audio\n    let audioOutIndex = 0;\n    audioMaps.forEach(a => {\n        mapArgs.push('-map', a.mapLabel);\n        \n        if (a.isGenerated) {\n            mapArgs.push(`-c:a:${audioOutIndex}`, 'libopus', `-b:a:${audioOutIndex}`, '192k');\n        } else {\n            mapArgs.push(`-c:a:${audioOutIndex}`, 'copy');\n        }\n\n        const isDef = (!a.isGenerated && a.sourceIndex === targetDefaultAudioIndex) ? 'default' : '0';\n        mapArgs.push(`-disposition:a:${audioOutIndex}`, isDef);\n        mapArgs.push(`-metadata:s:a:${audioOutIndex}`, `language=${a.lang}`);\n        mapArgs.push(`-metadata:s:a:${audioOutIndex}`, `title=${a.title}`);\n        \n        audioOutIndex++;\n    });\n\n    // Subtitles\n    let subOutIndex = 0;\n    subMaps.forEach(s => {\n        mapArgs.push('-map', s.mapLabel);\n        mapArgs.push(`-c:s:${subOutIndex}`, 'copy');\n        \n        // Disposition Logic (Default + Forced)\n        let dispFlags = [];\n        // 1. Check Default preference\n        if (s.sourceIndex === targetDefaultSubIndex) {\n            dispFlags.push('default');\n        }\n        // 2. Check Forced (Preserve existing flag)\n        if (s.isForced) {\n            dispFlags.push('forced');\n        }\n        // 3. Combine or set 0\n        const dispositionStr = dispFlags.length > 0 ? dispFlags.join('+') : '0';\n        mapArgs.push(`-disposition:s:${subOutIndex}`, dispositionStr);\n        mapArgs.push(`-metadata:s:s:${subOutIndex}`, `language=${s.lang}`);\n        mapArgs.push(`-metadata:s:s:${subOutIndex}`, `title=${s.title}`);\n        \n        subOutIndex++;\n    });\n\n    // 1. Checks if attachment has mimetype to prevent FFmpeg crash.\n    // 2. Explicitly maps metadata for attachments (overriding global strip).\n    const attachmentStreams = streams.filter(s => s.codec_type === 'attachment');\n    let hasMappedAttachment = false;\n\n    attachmentStreams.forEach(s => {\n        // Check if mimetype tag exists\n        const hasMimetype = s.tags && (s.tags.mimetype || s.tags.MIMETYPE || s.tags['Content-Type']);\n        \n        if (hasMimetype) {\n            mapArgs.push('-map', `0:${s.index}`);\n            hasMappedAttachment = true;\n        } else {\n            console.log(`[Normalizer] Skipping Attachment Stream ${s.index}: No Mimetype Tag.`);\n        }\n    });\n\n    if (hasMappedAttachment) {\n        mapArgs.push('-c:t', 'copy');\n        // CRITICAL: Explicitly copy attachment metadata, otherwise -map_metadata -1 wipes the mimetype!\n        mapArgs.push('-map_metadata:s:t', '0:s:t');\n    }\n\n    // Combine\n    let finalArgs = ['-map_metadata', '-1', '-map_chapters', '0'];\n    if (filterComplex.length > 0) {\n        finalArgs.push('-filter_complex', filterComplex.join(';'));\n    }\n    finalArgs.push(...mapArgs);\n\n    // Log the joined array for debug\n    console.log(\"Normalizer Generated Command:\", finalArgs.join(' '));\n\n    // --- 8. BYPASS OBJECT (FULL GHOST LIST) ---\n    // We map ALL streams but mark them \"removed: true\".\n    // This ensures Tdarr's index matches the file, but it adds NO maps.\n    // We strictly enable Stream 0 (with dummy args) to satisfy the \"No Streams Mapped\" safety check.\n    \n    const ghostStreams = streams.map((s, idx) => {\n        const isActive = (idx === 0);\n        return {\n            ...s,\n            removed: !isActive, \n            mapArgs: [],        \n            inputArgs: [],\n            outputArgs: isActive ? ['-metadata', 'tdarr=true'] : [], \n        };\n    });\n\n    args.variables.ffmpegCommand = {\n        init: true,\n        inputFiles: [],\n        streams: ghostStreams,\n        container: container,\n        hardwareDecoding: false,\n        shouldProcess: true,\n        overallInputArguments: [],\n        overallOuputArguments: finalArgs,\n    };\n\n    return {\n        outputFileObj: args.inputFileObj,\n        outputNumber: 1,\n        variables: args.variables,\n    };\n\n  } catch (err) {\n    console.error(\"Normalizer Node Error:\", err);\n    throw err;\n  }\n};"
+      }
+    },
+    {
+      "name": "Custom Arguments",
+      "sourceRepo": "Community",
+      "pluginName": "ffmpegCommandCustomArguments",
+      "version": "1.0.0",
+      "id": "FPgo3fvIg",
+      "position": {
+        "x": 732,
+        "y": 36
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "outputArguments": "",
+        "inputArguments": "-hwaccel auto -probesize 50M -analyzeduration 100M"
+      }
+    },
+    {
+      "name": "Execute",
+      "sourceRepo": "Community",
+      "pluginName": "ffmpegCommandExecute",
+      "version": "1.0.0",
+      "id": "gDpdyAssZ",
+      "position": {
+        "x": 732,
+        "y": 96
+      },
+      "fpEnabled": true
+    },
+    {
+      "name": "Move To Done",
+      "sourceRepo": "Community",
+      "pluginName": "moveToDirectory",
+      "version": "2.0.0",
+      "id": "XKez58WZe",
+      "position": {
+        "x": 876,
+        "y": 180
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "outputDirectory": "/mnt/media/done",
+        "keepRelativePath": "true"
+      }
+    },
+    {
+      "name": "Delete Original",
+      "sourceRepo": "Community",
+      "pluginName": "deleteFile",
+      "version": "1.0.0",
+      "id": "eKXsX9n6V",
+      "position": {
+        "x": 876,
+        "y": 276
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "fileToDelete": "originalFile",
+        "deleteParentFolderIfEmpty": "true"
+      }
+    },
+    {
+      "name": "JS: Disable Live Size Check",
+      "sourceRepo": "Community",
+      "pluginName": "customFunction",
+      "version": "1.0.0",
+      "id": "QbF4ww9UE",
+      "position": {
+        "x": 840,
+        "y": -132
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "code": "module.exports = async (args) => {\n  \n  args.variables.liveSizeCompare = {\n    enabled: false,\n    error: false,\n    compareMethod: 'estimatedFinalSize',\n    thresholdPerc: 1000, // Set high just in case\n    checkDelaySeconds: 99999\n  };\n\n  // Clear the error flag explicitly\n  args.variables.liveSizeCompareError = false;\n\n  console.log(\"Live Size Check has been FORCE DISABLED (Boolean).\");\n\n  return {\n    outputFileObj: args.inputFileObj,\n    outputNumber: 1,\n    variables: args.variables,\n  };\n};"
+      }
+    },
+    {
+      "name": "Wait for Filesystem",
+      "sourceRepo": "Community",
+      "pluginName": "waitTimeout",
+      "version": "1.0.0",
+      "id": "iOx0QgbmI",
+      "position": {
+        "x": 876,
+        "y": 228
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "unit": "seconds",
+        "amount": "5"
+      }
+    },
+    {
+      "name": "Reset Flow Error",
+      "sourceRepo": "Community",
+      "pluginName": "resetFlowError",
+      "version": "1.0.0",
+      "id": "kZNzgc3HW",
+      "position": {
+        "x": 984,
+        "y": 312
+      },
+      "fpEnabled": true
+    }
+  ],
+  "flowEdges": [
+    {
+      "source": "9703jVfHF",
+      "sourceHandle": "1",
+      "target": "FPgo3fvIg",
+      "targetHandle": null,
+      "id": "eQxr0H2ms"
+    },
+    {
+      "source": "FPgo3fvIg",
+      "sourceHandle": "1",
+      "target": "gDpdyAssZ",
+      "targetHandle": null,
+      "id": "YqHfbyo6Q"
+    },
+    {
+      "source": "gDpdyAssZ",
+      "sourceHandle": "1",
+      "target": "XKez58WZe",
+      "targetHandle": null,
+      "id": "59odqVA-M"
+    },
+    {
+      "source": "ibrLkV_Os",
+      "sourceHandle": "1",
+      "target": "QbF4ww9UE",
+      "targetHandle": null,
+      "id": "JlyScRVI3"
+    },
+    {
+      "source": "QbF4ww9UE",
+      "sourceHandle": "1",
+      "target": "9703jVfHF",
+      "targetHandle": null,
+      "id": "NvHAAThBA"
+    },
+    {
+      "source": "9703jVfHF",
+      "sourceHandle": "2",
+      "target": "XKez58WZe",
+      "targetHandle": null,
+      "id": "2otBzGv4c"
+    },
+    {
+      "source": "XKez58WZe",
+      "sourceHandle": "1",
+      "target": "iOx0QgbmI",
+      "targetHandle": null,
+      "id": "lgjPwhgKe"
+    },
+    {
+      "source": "iOx0QgbmI",
+      "sourceHandle": "1",
+      "target": "eKXsX9n6V",
+      "targetHandle": null,
+      "id": "EFrwR9R6G"
+    },
+    {
+      "source": "eKXsX9n6V",
+      "sourceHandle": "err1",
+      "target": "kZNzgc3HW",
+      "targetHandle": null,
+      "id": "iL6PMyyTa"
+    },
+    {
+      "source": "kZNzgc3HW",
+      "sourceHandle": "1",
+      "target": "9NawNEukH",
+      "targetHandle": null,
+      "id": "xvNul1B7z"
+    },
+    {
+      "source": "9NawNEukH",
+      "sourceHandle": "1",
+      "target": "HoF8mH-KJ",
+      "targetHandle": null,
+      "id": "T-kMxX-VG"
+    }
+  ]
+}

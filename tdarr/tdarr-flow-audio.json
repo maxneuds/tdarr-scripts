@@ -1,0 +1,157 @@
+{
+  "_id": "z1SPtpntR",
+  "name": "Audio",
+  "description": "Audio",
+  "tags": "",
+  "flowPlugins": [
+    {
+      "name": "Input File",
+      "sourceRepo": "Community",
+      "pluginName": "inputFile",
+      "version": "1.0.0",
+      "id": "_-ro5fXdq",
+      "position": {
+        "x": 1056,
+        "y": -516
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "fileAccessChecks": "true",
+        "pauseNodeIfAccessChecksFail": "false"
+      }
+    },
+    {
+      "name": "JS: FFmpeg Master",
+      "sourceRepo": "Community",
+      "pluginName": "customFunction",
+      "version": "1.0.0",
+      "id": "OC3CVkTaX",
+      "position": {
+        "x": 1056,
+        "y": -324
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "code": "/*\n * MASTER MEDIA PROCESSOR v3.8\n * ---------------------------\n * 1. Resolution & Content Detection\n * 2. Audio Curator (Best German > Channels)\n * 3. Subtitle Deduplication (Prefer PGS over SRT)\n * 4. Subtitle Renaming (Standardized: \"GER Full\", \"ENG Forced\")\n * 5. Conditional Attachments\n * 6. Stream Sorting\n */\n\nmodule.exports = async (args) => {\n  try {\n    // --- 1. SETUP & SAFETY ---\n    if (!args.inputFileObj || !args.inputFileObj.ffProbeData) {\n      throw new Error(\"File has not been scanned!\");\n    }\n\n    const file = args.inputFileObj;\n    const streams = file.ffProbeData.streams;\n    const container = 'mkv';\n    const transcodeVar = args.variables.user.transcodeVideo;\n    const transcodeVideo = String(transcodeVar).toLowerCase() !== 'false';\n\n    // --- 2. ANALYZE STREAMS ---\n    \n    // Helper: Check forced status\n    const isForced = (s) => (s.disposition && s.disposition.forced === 1) || (s.tags && s.tags.title && s.tags.title.toLowerCase().includes('forced'));\n    // Helper: Get lang (returns 'ger', 'eng', 'und')\n    const getLang = (s) => (s.tags && s.tags.language ? s.tags.language.toLowerCase() : 'und');\n\n    // A. Audio Curator\n    let germanAudioCandidates = streams.filter(s => s.codec_type === 'audio' && getLang(s) === 'ger');\n    let targetDefaultAudioIndex = -1;\n    \n    if (germanAudioCandidates.length > 0) {\n        // Sort by Channels Descending\n        germanAudioCandidates.sort((a, b) => (b.channels || 0) - (a.channels || 0));\n        targetDefaultAudioIndex = germanAudioCandidates[0].index;\n    } else {\n        // Fallback: Keep original default or first audio\n        const originalDefault = streams.find(s => s.codec_type === 'audio' && s.disposition && s.disposition.default === 1);\n        targetDefaultAudioIndex = originalDefault ? originalDefault.index : (streams.find(s => s.codec_type === 'audio')?.index || -1);\n    }\n\n    const activeAudioStream = streams.find(s => s.index === targetDefaultAudioIndex);\n    const activeAudioLang = activeAudioStream ? getLang(activeAudioStream) : 'und';\n\n    // B. Subtitle Deduplication (PGS vs SRT) & Filtering\n    let pgsRegistry = new Set();\n    \n    // Register PGS\n    streams.forEach(s => {\n        if (s.codec_type === 'subtitle' && s.codec_name === 'hdmv_pgs_subtitle') {\n            const key = `${getLang(s)}_${isForced(s)}`;\n            pgsRegistry.add(key);\n        }\n    });\n\n    // Build valid subtitle list\n    let validSubtitleIndices = [];\n    const allowedSubLangs = ['eng', 'en', 'ger', 'de', 'deu', 'jpn', 'und'];\n    \n    streams.forEach(s => {\n        if (s.codec_type === 'subtitle') {\n            const lang = getLang(s);\n            const forced = isForced(s);\n            const title = (s.tags && s.tags.title || '').toLowerCase();\n            \n            // Filter Junk\n            if (!allowedSubLangs.includes(lang) || title.includes('commentary')) return;\n\n            // Dedupe: Skip SRT if equivalent PGS exists\n            if (s.codec_name === 'subrip' && pgsRegistry.has(`${lang}_${forced}`)) {\n                console.log(`[MasterNode] Removing Duplicate SRT: ${lang} (Forced: ${forced})`);\n                return; \n            }\n            validSubtitleIndices.push(s.index);\n        }\n    });\n\n    // C. Default Subtitle Logic\n    let targetDefaultSubIndex = -1;\n\n    // 1. Ger Forced\n    const gerForced = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'ger' && isForced(s));\n    \n    if (gerForced) {\n        targetDefaultSubIndex = gerForced.index;\n    } \n    // 2. Eng Forced\n    else {\n        const engForced = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'eng' && isForced(s));\n        if (engForced) {\n            targetDefaultSubIndex = engForced.index;\n        }\n        // 3. Audio Match Logic\n        else {\n            if (activeAudioLang === 'jpn') {\n                // If Audio is Japanese, prefer English Subs\n                const engFull = streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'eng' && !isForced(s));\n                targetDefaultSubIndex = engFull ? engFull.index : (streams.find(s => validSubtitleIndices.includes(s.index) && getLang(s) === 'ger' && !isForced(s))?.index || -1);\n            }\n        }\n    }\n\n    console.log(`[MasterNode] Audio Def: ${targetDefaultAudioIndex} | Sub Def: ${targetDefaultSubIndex}`);\n\n\n    // --- 3. BUILD COMMAND ---\n    \n    // Video Params\n    const videoStream = streams.find(s => s.codec_type === 'video' && (!s.disposition || s.disposition.attached_pic !== 1));\n    const width = videoStream ? (videoStream.width || 1920) : 1920;\n    const height = videoStream ? (videoStream.height || 1080) : 1080;\n    const pixel_count = width * height;\n    const filePath = file._id.toLowerCase();\n    const isAnimation = ['anime', 'cartoon', 'animation'].some(k => filePath.includes(k));\n    \n    let videoArgs = [];\n    console.log(`Transcoding Video: ${transcodeVideo}`)\n    if (transcodeVideo) {\n        let crf = '25'; \n        if (pixel_count >= 5000000) crf = '27'; // 4K\n        else if (pixel_count >= 3000000) crf = '26'; // 2K\n        else if (pixel_count >= 1000000) crf = '25'; // HD\n        else crf = '32'; // SD\n        // Animation: Strong Denoise, No Film Grain\n        // Film: Film Grain Synth\n        // Note: hqdn3d is a CPU filter, but very effective for anime\n        let paramsArr = [];\n        if (isAnimation) {\n            paramsArr.push('-vf', 'hqdn3d=1.5:1.5:3:3', '-svtav1-params', 'tune=0:enable-overlays=1:scd=1:enable-tf=0');\n        } else {\n            paramsArr.push('-svtav1-params', 'tune=0:enable-overlays=1:scd=1:film-grain=8');\n        }\n\n        videoArgs.push('-c:v', 'libsvtav1', '-preset', '5', '-pix_fmt', 'yuv420p10le', '-crf', crf, ...paramsArr);\n    } else {\n        videoArgs.push('-c:v', 'copy');\n    }\n    // Force mkv\n    videoArgs.push('-f', 'matroska')\n\n    // Base Command\n    const fileName = file.fileNameWithoutExtension;\n    const safeTitle = fileName;\n\n    let cmd = [\n        '-map_metadata:g', '-1',\n        '-metadata', `title=${safeTitle}`,\n        '-map_chapters', '0',\n    ];\n    // Map explicit video index to exclude Cover Art (which would be included by 0:v)\n    if (videoStream) {\n        cmd.push('-map', `0:${videoStream.index}`);\n    } else {\n        cmd.push('-map', '0:v');\n    }\n    cmd.push(...videoArgs);\n\n    // --- SORTING HELPERS ---\n    const langScore = (l) => {\n        if (['ger', 'de', 'deu'].includes(l)) return 1;\n        if (['eng', 'en'].includes(l)) return 2;\n        return 3;\n    };\n\n    // Audio Loop\n    let audioOutIndex = 0;\n    const audioStreams = streams.filter(s => s.codec_type === 'audio');\n    \n    audioStreams.sort((a, b) => {\n        const lsA = langScore(getLang(a));\n        const lsB = langScore(getLang(b));\n        if (lsA !== lsB) return lsA - lsB;\n        return (b.channels || 0) - (a.channels || 0);\n    });\n\n    for (const s of audioStreams) {\n        cmd.push(`-map`, `0:${s.index}`); // Split map and index for arg array\n        \n        // Codec\n        const channels = s.channels || 2;\n        if (s.codec_name === 'opus') {\n            cmd.push(`-c:a:${audioOutIndex}`, 'copy');\n        } else {\n            let bitrate = channels > 5 ? '448k' : (channels > 2 ? '320k' : '160k');\n            if (channels === 1) bitrate = '96k';\n            cmd.push(`-c:a:${audioOutIndex}`, 'libopus', `-b:a:${audioOutIndex}`, bitrate, `-ac:a:${audioOutIndex}`, `${channels}`);\n        }\n\n        // Disposition (Default/0)\n        const isDef = s.index === targetDefaultAudioIndex ? 'default' : '0';\n        cmd.push(`-disposition:a:${audioOutIndex}`, isDef);\n\n        // Metadata: Language & Title\n        const langCode = getLang(s);\n        const langUpper = langCode.toUpperCase();\n        let layout = channels === 1 ? '1.0' : channels === 2 ? '2.0' : channels === 6 ? '5.1' : channels === 8 ? '7.1' : `${channels}ch`;\n        const audioTitle = `${langUpper} ${layout}`;\n        // Explicitly set Language tag\n        cmd.push(`-metadata:s:a:${audioOutIndex}`, `language=${langCode}`);\n        cmd.push(`-metadata:s:a:${audioOutIndex}`, `title=${audioTitle}`);\n        \n        audioOutIndex++;\n    }\n\n    // Subtitle Loop\n    let subOutIndex = 0;\n    const subStreams = streams.filter(s => s.codec_type === 'subtitle' && validSubtitleIndices.includes(s.index));\n    subStreams.sort((a, b) => {\n        const lsA = langScore(getLang(a));\n        const lsB = langScore(getLang(b));\n        if (lsA !== lsB) return lsA - lsB;\n        const forcedA = isForced(a);\n        const forcedB = isForced(b);\n        if (forcedA !== forcedB) return forcedA ? -1 : 1;\n        return 0;\n    });\n\n    for (const s of subStreams) {\n        cmd.push(`-map`, `0:${s.index}`);\n        cmd.push(`-c:s:${subOutIndex}`, 'copy');\n\n        // Disposition Logic (Preserve Forced)\n        let dispFlags = [];\n        // 1. Is Default?\n        if (s.index === targetDefaultSubIndex) {\n            dispFlags.push('default');\n        }\n        // 2. Is Forced? (Check original stream)\n        if (isForced(s)) {\n            dispFlags.push('forced');\n        }\n        // 3. Combine\n        const dispositionStr = dispFlags.length > 0 ? dispFlags.join('+') : '0';\n        cmd.push(`-disposition:s:${subOutIndex}`, dispositionStr);\n\n        // Metadata: Standardized Renaming\n        const langCode = getLang(s); // 'ger'\n        const langUpper = langCode.toUpperCase(); // 'GER'\n        \n        // Logic: Forced vs Full vs SDH\n        let type = isForced(s) ? 'Forced' : 'Full';\n        if ((s.tags && s.tags.title || '').toLowerCase().includes('sdh')) {\n            type = 'SDH';\n        }\n        \n        // Rename subtitle streams to standardized names\n        // Name: \"GER Forced\" or \"ENG Full\"\n        const newTitle = `${langUpper} ${type}`;\n        cmd.push(`-metadata:s:s:${subOutIndex}`, `language=${langCode}`);\n        cmd.push(`-metadata:s:s:${subOutIndex}`, `title=${newTitle}`);\n        \n        subOutIndex++;\n    }\n\n    // Attachments (Conditional)\n    // Strictly check for 'attachment' type to exclude cover art videos\n    // Check for missing mimetypes to prevent MKV muxer crash\n    const attachmentStreams = streams.filter(s => s.codec_type === 'attachment');\n    let hasMappedAttachment = false;\n\n    attachmentStreams.forEach(s => {\n        const hasMimetype = s.tags && (s.tags.mimetype || s.tags.MIMETYPE || s.tags['Content-Type']);\n        if (hasMimetype) {\n            cmd.push('-map', `0:${s.index}`);\n            hasMappedAttachment = true;\n        } else {\n            console.log(`[MasterNode] Skipping Attachment Stream ${s.index}: No Mimetype Tag.`);\n        }\n    });\n\n    if (hasMappedAttachment) {\n        cmd.push('-c:t', 'copy', '-map_metadata:s:t', '0:s:t');\n    }\n\n    // --- BYPASS OBJECT (FULL GHOST LIST) ---\n    // Create ghost streams to bypass safety checks such that no unwanted video mapping occurs.\n    const ghostStreams = streams.map((s, idx) => {\n        const isActive = (idx === 0);\n        return {\n            ...s,\n            removed: !isActive, \n            mapArgs: [],        \n            inputArgs: [],\n            outputArgs: isActive ? ['-metadata', 'tdarr=true'] : [], \n        };\n    });\n\n    args.variables.ffmpegCommand = {\n        init: true,\n        inputFiles: [],\n        streams: ghostStreams,\n        container: container,\n        hardwareDecoding: false,\n        shouldProcess: false,\n        overallInputArguments: [],\n        overallOuputArguments: cmd,\n    };\n\n    return {\n        outputFileObj: args.inputFileObj,\n        outputNumber: 1,\n        variables: args.variables,\n    };\n\n  } catch (err) {\n    console.error(\"Master Node Error:\", err);\n    throw err;\n  }\n};"
+      }
+    },
+    {
+      "name": "Custom Arguments",
+      "sourceRepo": "Community",
+      "pluginName": "ffmpegCommandCustomArguments",
+      "version": "1.0.0",
+      "id": "A0Z6pwSbb",
+      "position": {
+        "x": 1056,
+        "y": -252
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "outputArguments": "",
+        "inputArguments": "-hwaccel auto -probesize 50M -analyzeduration 100M"
+      }
+    },
+    {
+      "name": "Execute",
+      "sourceRepo": "Community",
+      "pluginName": "ffmpegCommandExecute",
+      "version": "1.0.0",
+      "id": "q-fiJbubs",
+      "position": {
+        "x": 1056,
+        "y": -192
+      },
+      "fpEnabled": true
+    },
+    {
+      "name": "Disable: Transcode Video",
+      "sourceRepo": "Community",
+      "pluginName": "setFlowVariable",
+      "version": "1.0.0",
+      "id": "99BvHHczM",
+      "position": {
+        "x": 1056,
+        "y": -384
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "value": "false",
+        "variable": "transcodeVideo"
+      }
+    },
+    {
+      "name": "Go To Flow: Stereo Normalizer",
+      "sourceRepo": "Community",
+      "pluginName": "goToFlow",
+      "version": "2.0.0",
+      "id": "KJP7kl8Sr",
+      "position": {
+        "x": 1056,
+        "y": -132
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "flowId": "JOcVVRtSp"
+      }
+    },
+    {
+      "name": "JS: Disable Live Size Check",
+      "sourceRepo": "Community",
+      "pluginName": "customFunction",
+      "version": "1.0.0",
+      "id": "Q3L9r3z5R",
+      "position": {
+        "x": 1056,
+        "y": -468
+      },
+      "fpEnabled": true,
+      "inputsDB": {
+        "code": "module.exports = async (args) => {\n  \n  args.variables.liveSizeCompare = {\n    enabled: false,\n    error: false,\n    compareMethod: 'estimatedFinalSize',\n    thresholdPerc: 1000, // Set high just in case\n    checkDelaySeconds: 99999\n  };\n\n  // Clear the error flag explicitly\n  args.variables.liveSizeCompareError = false;\n\n  console.log(\"Live Size Check has been FORCE DISABLED (Boolean).\");\n\n  return {\n    outputFileObj: args.inputFileObj,\n    outputNumber: 1,\n    variables: args.variables,\n  };\n};"
+      }
+    }
+  ],
+  "flowEdges": [
+    {
+      "source": "A0Z6pwSbb",
+      "sourceHandle": "1",
+      "target": "q-fiJbubs",
+      "targetHandle": null,
+      "id": "lU0XUcgrf"
+    },
+    {
+      "source": "99BvHHczM",
+      "sourceHandle": "1",
+      "target": "OC3CVkTaX",
+      "targetHandle": null,
+      "id": "HSfxg3gRd"
+    },
+    {
+      "source": "OC3CVkTaX",
+      "sourceHandle": "1",
+      "target": "A0Z6pwSbb",
+      "targetHandle": null,
+      "id": "WFrxz_J9o"
+    },
+    {
+      "source": "q-fiJbubs",
+      "sourceHandle": "1",
+      "target": "KJP7kl8Sr",
+      "targetHandle": null,
+      "id": "FiXGevgsT"
+    },
+    {
+      "source": "_-ro5fXdq",
+      "sourceHandle": "1",
+      "target": "Q3L9r3z5R",
+      "targetHandle": null,
+      "id": "zlWjYr5_q"
+    },
+    {
+      "source": "Q3L9r3z5R",
+      "sourceHandle": "1",
+      "target": "99BvHHczM",
+      "targetHandle": null,
+      "id": "MkArN_1I4"
+    }
+  ]
+}
