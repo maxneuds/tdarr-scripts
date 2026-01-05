@@ -1,5 +1,5 @@
 /*
- * NORMALIZER v1.5
+ * NORMALIZER v1.6
  * ---------------------------------
  * 1. Analyzes audio streams.
  * 2. Downmixes Surround (4.0/5.1/7.1) to Stereo with normalization.
@@ -202,7 +202,11 @@ module.exports = async (args) => {
         } else if (stream.codec_type === 'subtitle') {
             if (validSubtitleIndices.includes(index)) {
                 const lang = getLang(stream);
-                const type = isForced(stream) ? 'Forced' : 'Full';
+                let type = isForced(stream) ? 'Forced' : 'Full';
+                if ((stream.tags && stream.tags.title || '').toLowerCase().includes('sdh')) {
+                    type = 'SDH';
+                }
+
                 subMaps.push({
                     sourceIndex: index,
                     lang: lang,

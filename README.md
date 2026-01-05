@@ -13,7 +13,7 @@ This repository contains two advanced Tdarr plugins designed for high-end media 
 
 ---
 
-## 1. Master Media Processor v3.7
+## 1. Master Media Processor v3.8
 
 A monolithic plugin designed to act as the "brain" of the encoding stack. It handles video compression (AV1), subtitle deduplication, and metadata standardization.
 
@@ -64,7 +64,7 @@ Solves the "subtitle spam" issue.
 
 1. **Registry:** Scans all PGS (Image-based) subtitles first.
 2. **Dedupe:** If a text-based (SRT) subtitle exists with the same Language and Forced status as a PGS track, the SRT is **discarded**.
-3. **Renaming:** Renames tracks to standardized titles: `GER Full`, `ENG Forced`, etc.
+3. **Renaming:** Renames tracks to standardized titles: `GER Full`, `ENG Forced`, `ENG SDH` etc.
 4. **Default Logic:**
 * Priority 1: **German Forced**
 * Priority 2: **English Forced**
@@ -74,7 +74,7 @@ Solves the "subtitle spam" issue.
 
 ---
 
-## 2. Audio Normalizer v1.5
+## 2. Audio Normalizer v1.6
 
 This script is a conditional processor. It **only** runs if Surround Sound (4.0, 5.1, or 7.1) is detected. It generates a new "Night Mode" stereo track alongside the original surround tracks.
 

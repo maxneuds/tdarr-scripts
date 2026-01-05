@@ -1,5 +1,5 @@
 /*
- * MASTER MEDIA PROCESSOR v3.7
+ * MASTER MEDIA PROCESSOR v3.8
  * ---------------------------
  * 1. Resolution & Content Detection
  * 2. Audio Curator (Best German > Channels)
@@ -241,8 +241,11 @@ module.exports = async (args) => {
         const langCode = getLang(s); // 'ger'
         const langUpper = langCode.toUpperCase(); // 'GER'
         
-        // Logic: Forced vs Full
-        const type = isForced(s) ? 'Forced' : 'Full';
+        // Logic: Forced vs Full vs SDH
+        let type = isForced(s) ? 'Forced' : 'Full';
+        if ((s.tags && s.tags.title || '').toLowerCase().includes('sdh')) {
+            type = 'SDH';
+        }
         
         // Rename subtitle streams to standardized names
         // Name: "GER Forced" or "ENG Full"
