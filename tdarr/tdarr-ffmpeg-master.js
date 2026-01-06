@@ -1,5 +1,5 @@
 /*
- * MASTER MEDIA PROCESSOR v3.9
+ * MASTER MEDIA PROCESSOR v3.10
  * ---------------------------
  * 1. Resolution & Content Detection
  * 2. Audio Curator (Best German > Channels)
@@ -116,28 +116,71 @@ module.exports = async (args) => {
     const pixel_count = width * height;
     const filePath = file._id.toLowerCase();
     const isAnimation = ['anime', 'cartoon', 'animation'].some(k => filePath.includes(k));
+    // HDR Detection
+    // We check the transfer characteristic. 'smpte2084' = PQ (HDR10), 'arib-std-b67' = HLG.
+    const srcTransfer = videoStream.color_transfer || 'unknown';
+    const isHDR = (srcTransfer === 'smpte2084' || srcTransfer === 'arib-std-b67');
     
     let videoArgs = [];
-    console.log(`Transcoding Video: ${transcodeVideo}`)
+    console.log(`Transcoding Video: ${transcodeVideo} | HDR Detected: ${isHDR} (${srcTransfer})`);
     if (transcodeVideo) {
-        let crf = '24'; 
-        if (pixel_count >= 5000000) crf = '26'; // 4K
-        else if (pixel_count >= 3000000) crf = '25'; // 2K
-        else if (pixel_count >= 1000000) crf = '24'; // HD
-        else crf = '32'; // SD
-        // Animation: Strong Denoise, No Film Grain
-        // Film: Film Grain Synth
-        // Note: hqdn3d is a CPU filter, but very effective for anime
         let paramsArr = [];
+        let vfChain = [];
+
+        // 1. BASE SETTINGS
+        // HDR requires lower CRF (higher quality) to prevent banding in dark scenes
+        let crf = isHDR ? '20' : '22';
+        // Resolution-based overrides
+        if (pixel_count >= 5000000) { // 4K+
+            crf = isHDR ? '21' : '23';
+        } else if (pixel_count >= 1000000) { // HD+
+            crf = isHDR ? '20' : '22'; 
+        } else { // SD
+            crf = '28';
+        }
+        // Animation overrides (CRF bump + Denoise)
         if (isAnimation) {
-            paramsArr.push('-vf', 'hqdn3d=1.5:1.5:3:3', '-svtav1-params', 'tune=0:enable-overlays=1:scd=1:enable-tf=0');
-        } else {
-            // Grain Switch: 4K (Cleaner) vs HD (Stronger for banding fix)
-            const grainLevel = (pixel_count >= 5000000) ? '15' : '25';
-            paramsArr.push('-svtav1-params', `tune=0:enable-overlays=1:scd=1:enable-qm=1:film-grain=${grainLevel}`);
-            paramsArr.push('-svtav1-params', 'tune=0:enable-overlays=1:scd=1:film-grain=8');
+            crf = String(parseInt(crf) + 2);
         }
 
+        // 2. HDR METADATA TRANSFER
+        // Film: Film Grain Synth
+        if (isHDR) {
+            // Extract exact source values or fallback to standard HDR10 defaults
+            const prim = videoStream.color_primaries || 'bt2020';
+            const trc = videoStream.color_transfer || 'smpte2084';
+            const space = videoStream.color_space || 'bt2020nc';
+            videoArgs.push(
+                '-color_primaries', prim,
+                '-color_trc', trc, 
+                '-colorspace', space,
+                '-chroma_sample_location', 'topleft' // Standard for 4K Blu-ray
+            );
+            // Lower grain for HDR (SVT-AV1 tends to over-grain HDR)
+            const grain = (pixel_count >= 5000000) ? '8' : '10';
+            paramsArr.push('-svtav1-params', `tune=0:enable-overlays=1:scd=1:enable-qm=1:film-grain=${grain}`);
+            // Light sharpen for that "8K Detail" look on HDR
+            // Only apply if not animation
+            if (!isAnimation) vfChain.push('cas=0.5');
+        } else {
+            // --- SDR SETTINGS ---
+            const grain = (pixel_count >= 5000000) ? '10' : '12';
+            paramsArr.push('-svtav1-params', `tune=0:enable-overlays=1:scd=1:film-grain=${grain}`);
+        }
+
+        // 3. ANIMATION FILTERS
+        // Animation: Strong Denoise, No Film Grain
+        if (isAnimation) {
+            // Override previous filters: Denoise is king for animation
+            vfChain = ['hqdn3d=1.5:1.5:3:3']; 
+            // Disable film grain synth for animation
+            paramsArr = ['-svtav1-params', 'tune=0:enable-overlays=1:scd=1:enable-tf=0']; 
+        }
+
+        // 4. COMPILE COMMAND
+        if (vfChain.length > 0) {
+            videoArgs.push('-vf', vfChain.join(','));
+        }
         videoArgs.push('-c:v', 'libsvtav1', '-preset', '5', '-pix_fmt', 'yuv420p10le', '-crf', crf, ...paramsArr);
     } else {
         videoArgs.push('-c:v', 'copy');
